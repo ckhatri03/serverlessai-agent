@@ -4,6 +4,7 @@ import shutil
 import signal
 import subprocess
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +31,18 @@ class Settings(BaseModel):
 
 
 settings = Settings()
-app = FastAPI(title="Serverless AI Agent", version=APP_VERSION)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings.models_dir.mkdir(parents=True, exist_ok=True)
+    settings.outputs_dir.mkdir(parents=True, exist_ok=True)
+    settings.workflows_dir.mkdir(parents=True, exist_ok=True)
+    register_with_control_plane()
+    yield
+
+
+app = FastAPI(title="Serverless AI Agent", version=APP_VERSION, lifespan=lifespan)
 
 
 class HealthResponse(BaseModel):
@@ -184,14 +196,6 @@ def register_with_control_plane() -> None:
 
     persist_agent_token(permanent_token)
     settings.agent_token = permanent_token
-
-
-@app.on_event("startup")
-def prepare_workspace() -> None:
-    settings.models_dir.mkdir(parents=True, exist_ok=True)
-    settings.outputs_dir.mkdir(parents=True, exist_ok=True)
-    settings.workflows_dir.mkdir(parents=True, exist_ok=True)
-    register_with_control_plane()
 
 
 @app.get("/health", response_model=HealthResponse)
