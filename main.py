@@ -102,6 +102,18 @@ class RunWorkflowResponse(BaseModel):
     clientId: str
 
 
+class ExecRequest(BaseModel):
+    command: str
+    cwd: str | None = None
+    env: dict[str, str] | None = None
+
+
+class ExecResponse(BaseModel):
+    stdout: str
+    stderr: str
+    exitCode: int
+
+
 class WorkflowStatusResponse(BaseModel):
     promptId: str
     history: dict[str, Any]
@@ -336,6 +348,33 @@ async def workflow_status(prompt_id: str) -> WorkflowStatusResponse:
     if not response.ok:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=response.text)
     return WorkflowStatusResponse(promptId=prompt_id, history=response.json())
+
+
+@app.post("/exec", response_model=ExecResponse, dependencies=[Depends(require_agent_auth)])
+async def execute_command(request: ExecRequest) -> ExecResponse:
+    try:
+        process = subprocess.run(
+            request.command,
+            shell=True,
+            cwd=request.cwd,
+            env={**os.environ, **(request.env or {})},
+            capture_output=True,
+            text=True,
+            timeout=300, # 5 minute timeout for potentially long installs
+        )
+        return ExecResponse(
+            stdout=process.stdout,
+            stderr=process.stderr,
+            exitCode=process.returncode,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return ExecResponse(
+            stdout=exc.stdout.decode() if exc.stdout else "",
+            stderr=(exc.stderr.decode() if exc.stderr else "") + "\nCommand timed out",
+            exitCode=124,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
 
 
 @app.post("/upload-output", response_model=UploadOutputResponse, dependencies=[Depends(require_agent_auth)])
