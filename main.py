@@ -280,7 +280,8 @@ def get_comfyui_path() -> Path | None:
         Path("/app/ComfyUI"),
     ]
     for loc in locations:
-        if (loc / "main.py").exists():
+        # A valid installation requires both the main entry point AND the sentinel file
+        if (loc / "main.py").exists() and (loc / ".install-complete").exists():
             return loc
     return None
 
@@ -318,7 +319,8 @@ def get_comfyui_custom_nodes(comfy_path: Path) -> list[str]:
 
 
 def is_comfyui_manager_installed(comfy_path: Path) -> bool:
-    return (comfy_path / "custom_nodes" / "ComfyUI-Manager").exists()
+    manager_path = comfy_path / "custom_nodes" / "ComfyUI-Manager"
+    return (manager_path / ".install-complete").exists()
 
 
 def load_persisted_agent_token() -> str:
