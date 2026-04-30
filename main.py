@@ -29,6 +29,15 @@ class Settings(BaseModel):
     pod_id: str = Field(default_factory=lambda: os.getenv("RUNPOD_POD_ID", os.getenv("RUNPOD_POD_HOSTNAME", "")))
     public_url: str = Field(default_factory=lambda: os.getenv("SERVERLESSAI_AGENT_PUBLIC_URL", ""))
 
+    @property
+    def effective_public_url(self) -> str:
+        if self.public_url:
+            return self.public_url
+        if self.pod_id:
+            # Construct RunPod proxy URL
+            return f"https://{self.pod_id}-8000.proxy.runpod.net"
+        return ""
+
 
 settings = Settings()
 
@@ -237,7 +246,7 @@ def register_with_control_plane() -> None:
     payload = {
         "registerToken": settings.register_token,
         "podId": settings.pod_id,
-        "publicUrl": settings.public_url,
+        "publicUrl": settings.effective_public_url,
         "version": APP_VERSION,
         "systemInfo": {
             "pytorch": get_pytorch_version(),
