@@ -335,6 +335,53 @@ def comfyui_log_file() -> Path:
     return settings.workspace_dir / "comfyui.log"
 
 
+def ensure_comfyui_runtime(comfy_path: Path, log_path: Path) -> None:
+    python_bin = comfy_path / "venv" / "bin" / "python3"
+    if not python_bin.exists():
+        return
+
+    check = subprocess.run(
+        [str(python_bin), "-c", "import torch; raise SystemExit(0 if hasattr(torch.library, 'custom_op') else 1)"],
+        cwd=comfy_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if check.returncode == 0:
+        return
+
+    with log_path.open("ab") as log_file:
+        log_file.write(b"Installing CUDA 11.8 Torch runtime for current ComfyUI...\n")
+        subprocess.run(
+            [
+                str(python_bin),
+                "-m",
+                "pip",
+                "install",
+                "--upgrade",
+                "--force-reinstall",
+                "torch==2.4.1+cu118",
+                "torchvision==0.19.1+cu118",
+                "torchaudio==2.4.1+cu118",
+                "--extra-index-url",
+                "https://download.pytorch.org/whl/cu118",
+            ],
+            cwd=comfy_path,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            timeout=1800,
+            check=True,
+        )
+        subprocess.run(
+            [str(python_bin), "-m", "pip", "install", "numpy>=1.25,<2"],
+            cwd=comfy_path,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            timeout=600,
+            check=True,
+        )
+
+
 def get_comfyui_pid() -> int | None:
     pid_path = comfyui_pid_file()
     if not pid_path.exists():
@@ -380,6 +427,7 @@ def start_comfyui_process() -> ComfyUIStartResponse:
         python_bin = Path("python3")
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_comfyui_runtime(comfy_path, log_path)
     log_file = log_path.open("ab")
     process = subprocess.Popen(
         [str(python_bin), "main.py", "--listen", "0.0.0.0", "--port", "8188"],
