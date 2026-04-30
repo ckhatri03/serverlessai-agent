@@ -11,7 +11,7 @@ from typing import Any
 
 import requests
 from fastapi import Depends, FastAPI, Header, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, HttpUrl
 
 
 APP_VERSION = "0.1.1"
@@ -30,6 +30,7 @@ class Settings(BaseModel):
     pod_id: str = Field(default_factory=lambda: os.getenv("RUNPOD_POD_ID", os.getenv("RUNPOD_POD_HOSTNAME", "")))
     public_url: str = Field(default_factory=lambda: os.getenv("SERVERLESSAI_AGENT_PUBLIC_URL", ""))
     agent_log_file: Path = Field(default_factory=lambda: Path(os.getenv("SERVERLESSAI_AGENT_LOG_FILE", "/workspace/agent.log")))
+    auto_start_comfyui: bool = Field(default_factory=lambda: os.getenv("SERVERLESSAI_AUTO_START_COMFYUI", "true").lower() == "true")
 
     @property
     def effective_public_url(self) -> str:
@@ -87,6 +88,11 @@ async def lifespan(app: FastAPI):
     settings.models_dir.mkdir(parents=True, exist_ok=True)
     settings.outputs_dir.mkdir(parents=True, exist_ok=True)
     settings.workflows_dir.mkdir(parents=True, exist_ok=True)
+    if settings.auto_start_comfyui and get_comfyui_path():
+        try:
+            start_comfyui_process()
+        except Exception as exc:
+            print(f"Failed to auto-start ComfyUI: {exc}")
     register_with_control_plane()
     yield
 
@@ -124,6 +130,7 @@ class SystemInfoResponse(BaseModel):
 class ComfyUIInfoResponse(BaseModel):
     installed: bool
     version: str
+    running: bool
     managerInstalled: bool
     customNodes: list[str]
 
@@ -169,6 +176,32 @@ class ExecResponse(BaseModel):
     stdout: str
     stderr: str
     exitCode: int
+
+
+class ComfyUIStartResponse(BaseModel):
+    started: bool
+    running: bool
+    pid: int | None = None
+    logPath: str
+
+
+class ComfyUIStopResponse(BaseModel):
+    stopped: bool
+    running: bool
+
+
+class InstallCustomNodeRequest(BaseModel):
+    repoUrl: HttpUrl
+    name: str | None = None
+    branch: str | None = None
+    installRequirements: bool = True
+
+
+class InstallCustomNodeResponse(BaseModel):
+    name: str
+    path: str
+    installed: bool
+    requirementsInstalled: bool
 
 
 class WorkflowStatusResponse(BaseModel):
@@ -284,6 +317,83 @@ def get_comfyui_path() -> Path | None:
         if (loc / "main.py").exists() and (loc / ".install-complete").exists():
             return loc
     return None
+
+
+def get_comfyui_path_for_management() -> Path:
+    comfy_path = get_comfyui_path()
+    if not comfy_path:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="ComfyUI is not installed")
+    return comfy_path
+
+
+def comfyui_pid_file() -> Path:
+    return settings.workspace_dir / "comfyui.pid"
+
+
+def comfyui_log_file() -> Path:
+    return settings.workspace_dir / "comfyui.log"
+
+
+def get_comfyui_pid() -> int | None:
+    pid_path = comfyui_pid_file()
+    if not pid_path.exists():
+        return None
+    try:
+        return int(pid_path.read_text().strip())
+    except ValueError:
+        return None
+
+
+def process_running(pid: int | None) -> bool:
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def comfyui_running() -> bool:
+    return comfyui_reachable() or process_running(get_comfyui_pid())
+
+
+def start_comfyui_process() -> ComfyUIStartResponse:
+    comfy_path = get_comfyui_path_for_management()
+    pid = get_comfyui_pid()
+    log_path = comfyui_log_file()
+
+    if comfyui_running():
+        return ComfyUIStartResponse(started=False, running=True, pid=pid, logPath=str(log_path))
+
+    python_bin = comfy_path / "venv" / "bin" / "python3"
+    if not python_bin.exists():
+        python_bin = Path("python3")
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_file = log_path.open("ab")
+    process = subprocess.Popen(
+        [str(python_bin), "main.py", "--listen", "0.0.0.0", "--port", "8188"],
+        cwd=comfy_path,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    comfyui_pid_file().write_text(str(process.pid))
+    return ComfyUIStartResponse(started=True, running=True, pid=process.pid, logPath=str(log_path))
+
+
+def stop_comfyui_process() -> ComfyUIStopResponse:
+    pid = get_comfyui_pid()
+    if not process_running(pid):
+        return ComfyUIStopResponse(stopped=False, running=False)
+
+    assert pid is not None
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return ComfyUIStopResponse(stopped=False, running=False)
+    return ComfyUIStopResponse(stopped=True, running=False)
 
 
 def get_comfyui_version(comfy_path: Path) -> str:
@@ -413,13 +523,68 @@ async def system_info() -> SystemInfoResponse:
 async def comfyui_info() -> ComfyUIInfoResponse:
     path = get_comfyui_path()
     if not path:
-        return ComfyUIInfoResponse(installed=False, version="N/A", managerInstalled=False, customNodes=[])
+        return ComfyUIInfoResponse(installed=False, version="N/A", running=False, managerInstalled=False, customNodes=[])
     
     return ComfyUIInfoResponse(
         installed=True,
         version=get_comfyui_version(path),
+        running=comfyui_running(),
         managerInstalled=is_comfyui_manager_installed(path),
         customNodes=get_comfyui_custom_nodes(path),
+    )
+
+
+@app.post("/comfyui/start", response_model=ComfyUIStartResponse, dependencies=[Depends(require_agent_auth)])
+async def start_comfyui() -> ComfyUIStartResponse:
+    return start_comfyui_process()
+
+
+@app.post("/comfyui/stop", response_model=ComfyUIStopResponse, dependencies=[Depends(require_agent_auth)])
+async def stop_comfyui() -> ComfyUIStopResponse:
+    return stop_comfyui_process()
+
+
+@app.post("/custom-nodes/install", response_model=InstallCustomNodeResponse, dependencies=[Depends(require_agent_auth)])
+async def install_custom_node(request: InstallCustomNodeRequest) -> InstallCustomNodeResponse:
+    comfy_path = get_comfyui_path_for_management()
+    nodes_dir = comfy_path / "custom_nodes"
+    nodes_dir.mkdir(parents=True, exist_ok=True)
+
+    repo_url = str(request.repoUrl)
+    node_name = request.name or repo_url.rstrip("/").split("/")[-1].removesuffix(".git")
+    if not node_name or "/" in node_name or node_name.startswith("."):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid custom node name")
+
+    target = nodes_dir / node_name
+    if target.exists() and not (target / ".git").exists():
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Target custom node directory exists but is not a git repository")
+
+    try:
+        if target.exists():
+            subprocess.run(["git", "pull", "--ff-only"], cwd=target, check=True, capture_output=True, text=True, timeout=120)
+        else:
+            clone_cmd = ["git", "clone", repo_url, str(target)]
+            if request.branch:
+                clone_cmd = ["git", "clone", "--branch", request.branch, "--single-branch", repo_url, str(target)]
+            subprocess.run(clone_cmd, check=True, capture_output=True, text=True, timeout=300)
+    except subprocess.CalledProcessError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=exc.stderr or exc.stdout or "Git operation failed") from exc
+
+    requirements_installed = False
+    requirements = target / "requirements.txt"
+    python_bin = comfy_path / "venv" / "bin" / "python3"
+    if request.installRequirements and requirements.exists():
+        try:
+            subprocess.run([str(python_bin), "-m", "pip", "install", "-r", str(requirements)], check=True, capture_output=True, text=True, timeout=600)
+            requirements_installed = True
+        except subprocess.CalledProcessError as exc:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=exc.stderr or exc.stdout or "Requirements installation failed") from exc
+
+    return InstallCustomNodeResponse(
+        name=node_name,
+        path=str(target),
+        installed=True,
+        requirementsInstalled=requirements_installed,
     )
 
 
