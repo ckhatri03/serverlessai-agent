@@ -4,6 +4,7 @@ import json
 import shutil
 import signal
 import subprocess
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -347,6 +348,14 @@ def get_comfyui_pid() -> int | None:
 def process_running(pid: int | None) -> bool:
     if not pid:
         return False
+    cmdline = Path(f"/proc/{pid}/cmdline")
+    if cmdline.exists():
+        try:
+            command = cmdline.read_text(errors="ignore")
+            if "ComfyUI" not in command and "main.py" not in command:
+                return False
+        except Exception:
+            pass
     try:
         os.kill(pid, 0)
         return True
@@ -380,7 +389,8 @@ def start_comfyui_process() -> ComfyUIStartResponse:
         start_new_session=True,
     )
     comfyui_pid_file().write_text(str(process.pid))
-    return ComfyUIStartResponse(started=True, running=True, pid=process.pid, logPath=str(log_path))
+    time.sleep(5)
+    return ComfyUIStartResponse(started=True, running=comfyui_reachable() or process.poll() is None, pid=process.pid, logPath=str(log_path))
 
 
 def stop_comfyui_process() -> ComfyUIStopResponse:
