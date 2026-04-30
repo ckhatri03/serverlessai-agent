@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-RAW_BASE="${SERVERLESSAI_AGENT_REPO_RAW_BASE:-https://raw.githubusercontent.com/user/serverlessai-agent/main}"
+RAW_BASE="${SERVERLESSAI_AGENT_REPO_RAW_BASE:-https://raw.githubusercontent.com/ckhatri03/serverlessai-agent/main}"
 INSTALL_DIR="${SERVERLESSAI_AGENT_INSTALL_DIR:-/workspace/serverlessai-agent}"
 REQUIRE_CUDA="${SERVERLESSAI_REQUIRE_CUDA:-true}"
 REQUIRE_PYTORCH="${SERVERLESSAI_REQUIRE_PYTORCH:-true}"
