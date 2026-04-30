@@ -42,8 +42,23 @@ class Settings(BaseModel):
 settings = Settings()
 
 
+def ensure_git_repo() -> None:
+    try:
+        # Check if .git exists
+        if not (Path.cwd() / ".git").exists():
+            print("Initializing git repository...")
+            subprocess.run(["git", "init"], check=True)
+            subprocess.run(["git", "remote", "add", "origin", "https://github.com/ckhatri03/serverlessai-agent.git"], check=True)
+            subprocess.run(["git", "fetch"], check=True)
+            # Force current files to match origin/main without deleting anything important
+            subprocess.run(["git", "checkout", "-t", "origin/main", "-f"], check=True)
+    except Exception as exc:
+        print(f"Failed to initialize git repo: {exc}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    ensure_git_repo()
     settings.models_dir.mkdir(parents=True, exist_ok=True)
     settings.outputs_dir.mkdir(parents=True, exist_ok=True)
     settings.workflows_dir.mkdir(parents=True, exist_ok=True)
