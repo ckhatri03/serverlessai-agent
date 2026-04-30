@@ -96,6 +96,13 @@ class SystemInfoResponse(BaseModel):
     comfyui: str
 
 
+class ComfyUIInfoResponse(BaseModel):
+    installed: bool
+    version: str
+    managerInstalled: bool
+    customNodes: list[str]
+
+
 class DownloadModelRequest(BaseModel):
     url: str
     destination: str
@@ -234,6 +241,55 @@ def get_nvidia_driver_version() -> str:
     return "not detected"
 
 
+def get_comfyui_path() -> Path | None:
+    # Common locations
+    locations = [
+        settings.workspace_dir / "ComfyUI",
+        Path("/workspace/ComfyUI"),
+        Path("/app/ComfyUI"),
+    ]
+    for loc in locations:
+        if (loc / "main.py").exists():
+            return loc
+    return None
+
+
+def get_comfyui_version(comfy_path: Path) -> str:
+    try:
+        # Try to get git version
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=comfy_path,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return "unknown"
+
+
+def get_comfyui_custom_nodes(comfy_path: Path) -> list[str]:
+    nodes_dir = comfy_path / "custom_nodes"
+    if not nodes_dir.exists():
+        return []
+    
+    nodes = []
+    try:
+        for item in nodes_dir.iterdir():
+            if item.is_dir() and not item.name.startswith("."):
+                nodes.append(item.name)
+    except Exception:
+        pass
+    return sorted(nodes)
+
+
+def is_comfyui_manager_installed(comfy_path: Path) -> bool:
+    return (comfy_path / "custom_nodes" / "ComfyUI-Manager").exists()
+
+
 def load_persisted_agent_token() -> str:
     if settings.agent_token:
         return settings.agent_token
@@ -317,6 +373,20 @@ async def system_info() -> SystemInfoResponse:
         cuda=get_cuda_version(),
         nvidia_driver=get_nvidia_driver_version(),
         comfyui="ok" if comfyui_reachable() else "not reachable",
+    )
+
+
+@app.get("/comfyui-info", response_model=ComfyUIInfoResponse, dependencies=[Depends(require_agent_auth)])
+async def comfyui_info() -> ComfyUIInfoResponse:
+    path = get_comfyui_path()
+    if not path:
+        return ComfyUIInfoResponse(installed=False, version="N/A", managerInstalled=False, customNodes=[])
+    
+    return ComfyUIInfoResponse(
+        installed=True,
+        version=get_comfyui_version(path),
+        managerInstalled=is_comfyui_manager_installed(path),
+        customNodes=get_comfyui_custom_nodes(path),
     )
 
 
