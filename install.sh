@@ -19,7 +19,7 @@ install_system_packages() {
   if have apt-get; then
     log "updating apt package index"
     apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl python3 python3-pip
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl git python3 python3-pip
     return
   fi
 

@@ -1,3 +1,4 @@
+import asyncio
 import os
 import json
 import shutil
@@ -13,7 +14,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, Field
 
 
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.1.1"
 
 
 class Settings(BaseModel):
@@ -43,23 +44,46 @@ class Settings(BaseModel):
 settings = Settings()
 
 
-def ensure_git_repo() -> None:
+async def ensure_git_repo() -> None:
     try:
         # Check if .git exists
         if not (Path.cwd() / ".git").exists():
             print("Initializing git repository...")
-            subprocess.run(["git", "init"], check=True)
-            subprocess.run(["git", "remote", "add", "origin", "https://github.com/ckhatri03/serverlessai-agent.git"], check=True)
-            subprocess.run(["git", "fetch"], check=True)
+            process = await asyncio.create_subprocess_exec(
+                "git", "init",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await process.wait()
+            
+            process = await asyncio.create_subprocess_exec(
+                "git", "remote", "add", "origin", "https://github.com/ckhatri03/serverlessai-agent.git",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await process.wait()
+            
+            process = await asyncio.create_subprocess_exec(
+                "git", "fetch",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await process.wait()
+            
             # Force current files to match origin/main without deleting anything important
-            subprocess.run(["git", "checkout", "-t", "origin/main", "-f"], check=True)
+            process = await asyncio.create_subprocess_exec(
+                "git", "checkout", "-t", "origin/main", "-f",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await process.wait()
     except Exception as exc:
         print(f"Failed to initialize git repo: {exc}")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    ensure_git_repo()
+    await ensure_git_repo()
     settings.models_dir.mkdir(parents=True, exist_ok=True)
     settings.outputs_dir.mkdir(parents=True, exist_ok=True)
     settings.workflows_dir.mkdir(parents=True, exist_ok=True)
@@ -138,6 +162,7 @@ class ExecRequest(BaseModel):
     command: str
     cwd: str | None = None
     env: dict[str, str] | None = None
+    background: bool = False
 
 
 class ExecResponse(BaseModel):
@@ -484,29 +509,67 @@ async def get_logs(path: str | None = None, lines: int = 100) -> LogsResponse:
 
 @app.post("/exec", response_model=ExecResponse, dependencies=[Depends(require_agent_auth)])
 async def execute_command(request: ExecRequest) -> ExecResponse:
+    full_env = {**os.environ, **(request.env or {})}
+    
+    if request.background:
+        try:
+            # For background execution, we use subprocess.Popen and don't wait
+            # We use start_new_session=True to ensure it keeps running if the agent restarts
+            subprocess.Popen(
+                request.command,
+                shell=True,
+                cwd=request.cwd,
+                env=full_env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+            return ExecResponse(
+                stdout="Command started in background",
+                stderr="",
+                exitCode=0
+            )
+        except Exception as exc:
+            return ExecResponse(
+                stdout="",
+                stderr=f"Failed to start background process: {exc}",
+                exitCode=1
+            )
+
     try:
-        process = subprocess.run(
+        # For synchronous execution, use asyncio to avoid blocking the event loop
+        process = await asyncio.create_subprocess_shell(
             request.command,
-            shell=True,
             cwd=request.cwd,
-            env={**os.environ, **(request.env or {})},
-            capture_output=True,
-            text=True,
-            timeout=300, # 5 minute timeout for potentially long installs
+            env=full_env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-        return ExecResponse(
-            stdout=process.stdout,
-            stderr=process.stderr,
-            exitCode=process.returncode,
-        )
-    except subprocess.TimeoutExpired as exc:
-        return ExecResponse(
-            stdout=exc.stdout.decode() if exc.stdout else "",
-            stderr=(exc.stderr.decode() if exc.stderr else "") + "\nCommand timed out",
-            exitCode=124,
-        )
+        
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300)
+            return ExecResponse(
+                stdout=stdout.decode() if stdout else "",
+                stderr=stderr.decode() if stderr else "",
+                exitCode=process.returncode or 0,
+            )
+        except asyncio.TimeoutExpired:
+            try:
+                process.terminate()
+            except:
+                pass
+            return ExecResponse(
+                stdout="",
+                stderr="Command timed out after 300 seconds",
+                exitCode=124,
+            )
+            
     except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+        return ExecResponse(
+            stdout="",
+            stderr=str(exc),
+            exitCode=1,
+        )
 
 
 @app.post("/upload-output", response_model=UploadOutputResponse, dependencies=[Depends(require_agent_auth)])
