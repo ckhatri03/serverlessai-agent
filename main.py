@@ -28,6 +28,7 @@ class Settings(BaseModel):
     workflows_dir: Path = Field(default_factory=lambda: Path(os.getenv("WORKFLOWS_DIR", "/workspace/workflows")))
     pod_id: str = Field(default_factory=lambda: os.getenv("RUNPOD_POD_ID", os.getenv("RUNPOD_POD_HOSTNAME", "")))
     public_url: str = Field(default_factory=lambda: os.getenv("SERVERLESSAI_AGENT_PUBLIC_URL", ""))
+    agent_log_file: Path = Field(default_factory=lambda: Path(os.getenv("SERVERLESSAI_AGENT_LOG_FILE", "/workspace/agent.log")))
 
     @property
     def effective_public_url(self) -> str:
@@ -148,6 +149,11 @@ class ExecResponse(BaseModel):
 class WorkflowStatusResponse(BaseModel):
     promptId: str
     history: dict[str, Any]
+
+
+class LogsResponse(BaseModel):
+    logs: str
+    path: str
 
 
 class UploadOutputRequest(BaseModel):
@@ -442,6 +448,38 @@ async def workflow_status(prompt_id: str) -> WorkflowStatusResponse:
     if not response.ok:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=response.text)
     return WorkflowStatusResponse(promptId=prompt_id, history=response.json())
+
+
+@app.get("/logs", response_model=LogsResponse, dependencies=[Depends(require_agent_auth)])
+async def get_logs(path: str | None = None, lines: int = 100) -> LogsResponse:
+    # Default to agent log file if no path provided
+    target_path = Path(path) if path else settings.agent_log_file
+    
+    # Security: Ensure path is within workspace_dir
+    try:
+        target_path = ensure_child_path(settings.workspace_dir, str(target_path))
+    except HTTPException:
+        # If it's the agent log file itself, it might be outside if configured so, 
+        # but by default it is in /workspace/agent.log
+        if path: # Only raise if the user provided an escaping path
+            raise
+    
+    if not target_path.exists():
+        if not path: # Default agent log might not exist yet
+            return LogsResponse(logs="", path=str(target_path))
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Log file not found")
+
+    try:
+        # Use tail command for efficiency
+        result = subprocess.run(
+            ["tail", "-n", str(lines), str(target_path)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return LogsResponse(logs=result.stdout, path=str(target_path))
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
 
 
 @app.post("/exec", response_model=ExecResponse, dependencies=[Depends(require_agent_auth)])
