@@ -65,6 +65,13 @@ class AgentStatusResponse(BaseModel):
     comfyuiReachable: bool
 
 
+class SystemInfoResponse(BaseModel):
+    pytorch: str
+    cuda: str
+    nvidia_driver: str
+    comfyui: str
+
+
 class DownloadModelRequest(BaseModel):
     url: str
     destination: str
@@ -154,6 +161,43 @@ def comfyui_reachable() -> bool:
         return False
 
 
+def get_pytorch_version() -> str:
+    try:
+        result = subprocess.run(
+            ["python3", "-c", "import torch; print(torch.__version__)"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return "not installed"
+
+
+def get_cuda_version() -> str:
+    try:
+        result = subprocess.run(["nvcc", "--version"], capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                if "release" in line:
+                    return line.split("release")[-1].strip().split(",")[0]
+    except Exception:
+        pass
+    return "not detected"
+
+
+def get_nvidia_driver_version() -> str:
+    try:
+        result = subprocess.run(["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"], capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return "not detected"
+
+
 def load_persisted_agent_token() -> str:
     if settings.agent_token:
         return settings.agent_token
@@ -183,6 +227,12 @@ def register_with_control_plane() -> None:
         "podId": settings.pod_id,
         "publicUrl": settings.public_url,
         "version": APP_VERSION,
+        "systemInfo": {
+            "pytorch": get_pytorch_version(),
+            "cuda": get_cuda_version(),
+            "nvidia_driver": get_nvidia_driver_version(),
+            "comfyui": "ok" if comfyui_reachable() else "not reachable",
+        },
     }
     try:
         response = requests.post(register_url, json=payload, timeout=20)
@@ -221,6 +271,16 @@ async def status_view() -> AgentStatusResponse:
         workflowsDir=str(settings.workflows_dir),
         comfyuiUrl=settings.comfyui_url,
         comfyuiReachable=comfyui_reachable(),
+    )
+
+
+@app.get("/system-info", response_model=SystemInfoResponse, dependencies=[Depends(require_agent_auth)])
+async def system_info() -> SystemInfoResponse:
+    return SystemInfoResponse(
+        pytorch=get_pytorch_version(),
+        cuda=get_cuda_version(),
+        nvidia_driver=get_nvidia_driver_version(),
+        comfyui="ok" if comfyui_reachable() else "not reachable",
     )
 
 
