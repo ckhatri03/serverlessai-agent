@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import requests
-from fastapi import Depends, FastAPI, Header, HTTPException, status
+from fastapi import Depends, FastAPI, Header, HTTPException, status, UploadFile, File
 from pydantic import BaseModel, Field, HttpUrl
 
 
@@ -967,6 +967,66 @@ async def shutdown(request: ShutdownRequest) -> dict[str, str | bool]:
 
     subprocess.Popen(["/bin/sh", "-c", "sleep 1 && kill -TERM 1"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return {"accepted": True}
+
+
+@app.get("/comfyui/object-info", dependencies=[Depends(require_agent_auth)])
+async def comfyui_object_info() -> Any:
+    response = comfyui_get("/object_info")
+    if not response.ok:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=response.text)
+    return response.json()
+
+
+@app.get("/comfyui/list-models", dependencies=[Depends(require_agent_auth)])
+async def list_models() -> dict[str, list[str]]:
+    comfy_path = get_comfyui_path()
+    if not comfy_path:
+        return {}
+    
+    models_root = comfy_path / "models"
+    if not models_root.exists():
+        return {}
+    
+    result = {}
+    for folder in models_root.iterdir():
+        if folder.is_dir():
+            files = []
+            for f in folder.rglob("*"):
+                if f.is_file() and f.suffix.lower() in {".safetensors", ".ckpt", ".pt", ".pth", ".bin"}:
+                    files.append(f.relative_to(folder).as_posix())
+            result[folder.name] = sorted(files)
+    return result
+
+
+@app.post("/upload", dependencies=[Depends(require_agent_auth)])
+async def upload_file(
+    file: UploadFile = File(...),
+    subfolder: str = "input",
+    root: str = "comfyui"
+) -> dict[str, str]:
+    roots = output_roots()
+    if root == "comfyui":
+        comfy_path = get_comfyui_path()
+        if not comfy_path:
+            raise HTTPException(status_code=400, detail="ComfyUI not installed")
+        target_root = comfy_path / "input"
+    elif root in roots:
+        target_root = roots[root]
+    else:
+        raise HTTPException(status_code=400, detail="Invalid root")
+
+    target_dir = ensure_child_path(target_root, subfolder)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    
+    target_path = target_dir / file.filename
+    with target_path.open("wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+        
+    return {
+        "filename": file.filename,
+        "subfolder": subfolder,
+        "path": target_path.relative_to(target_root).as_posix()
+    }
 
 
 if __name__ == "__main__":
