@@ -83,12 +83,35 @@ async def ensure_git_repo() -> None:
         print(f"Failed to initialize git repo: {exc}")
 
 
+async def trim_comfyui_logs() -> None:
+    log_path = comfyui_log_file()
+    while True:
+        try:
+            if log_path.exists():
+                # Use tail to get the last 100 lines and overwrite the file
+                process = await asyncio.create_subprocess_exec(
+                    "tail", "-n", "100", str(log_path),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, _ = await process.communicate()
+                if process.returncode == 0:
+                    log_path.write_bytes(stdout)
+        except Exception as exc:
+            print(f"Failed to trim ComfyUI logs: {exc}")
+        await asyncio.sleep(60) # Trim every minute
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await ensure_git_repo()
     settings.models_dir.mkdir(parents=True, exist_ok=True)
     settings.outputs_dir.mkdir(parents=True, exist_ok=True)
     settings.workflows_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Start log trimming task
+    trim_task = asyncio.create_task(trim_comfyui_logs())
+    
     if settings.auto_start_comfyui and get_comfyui_path():
         try:
             start_comfyui_process()
@@ -96,6 +119,11 @@ async def lifespan(app: FastAPI):
             print(f"Failed to auto-start ComfyUI: {exc}")
     register_with_control_plane()
     yield
+    trim_task.cancel()
+    try:
+        await trim_task
+    except asyncio.CancelledError:
+        pass
 
 
 app = FastAPI(title="Serverless AI Agent", version=APP_VERSION, lifespan=lifespan)
