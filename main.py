@@ -1,6 +1,7 @@
 import asyncio
 import os
 import json
+import mimetypes
 import shutil
 import signal
 import subprocess
@@ -238,6 +239,25 @@ class WorkflowStatusResponse(BaseModel):
     history: dict[str, Any]
 
 
+class OutputImage(BaseModel):
+    name: str
+    path: str
+    root: str
+    subfolder: str
+    sizeBytes: int
+    modifiedAt: str
+    type: str = "output"
+
+
+class OutputsResponse(BaseModel):
+    images: list[OutputImage]
+    total: int
+    page: int
+    pageSize: int
+    totalPages: int
+    outputsDir: str
+
+
 class LogsResponse(BaseModel):
     logs: str
     path: str
@@ -273,6 +293,26 @@ def ensure_child_path(root: Path, relative_path: str) -> Path:
     if root != target and root not in target.parents:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Path escapes allowed directory")
     return target
+
+
+def output_roots() -> dict[str, Path]:
+    roots = {"outputs": settings.outputs_dir}
+    comfy_path = get_comfyui_path()
+    if comfy_path:
+        comfy_output = comfy_path / "output"
+        if comfy_output.resolve() != settings.outputs_dir.resolve():
+            roots["comfyui"] = comfy_output
+    return roots
+
+
+def ensure_output_file(relative_path: str, root_name: str = "outputs") -> Path:
+    roots = output_roots()
+    if root_name not in roots:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unknown output root")
+    output_path = ensure_child_path(roots[root_name], relative_path)
+    if not output_path.exists() or not output_path.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Output file not found")
+    return output_path
 
 
 def comfyui_get(path: str) -> requests.Response:
@@ -458,7 +498,7 @@ def start_comfyui_process() -> ComfyUIStartResponse:
     ensure_comfyui_runtime(comfy_path, log_path)
     log_file = log_path.open("ab")
     process = subprocess.Popen(
-        [str(python_bin), "main.py", "--listen", "0.0.0.0", "--port", "8188"],
+        [str(python_bin), "main.py", "--listen", "0.0.0.0", "--port", "8188", "--output-directory", str(settings.outputs_dir)],
         cwd=comfy_path,
         stdout=log_file,
         stderr=subprocess.STDOUT,
@@ -745,6 +785,65 @@ async def workflow_view(filename: str, subfolder: str = "", type: str = "output"
         )
     except requests.RequestException as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"ComfyUI unavailable: {exc}")
+
+
+@app.get("/outputs", response_model=OutputsResponse, dependencies=[Depends(require_agent_auth)])
+async def list_outputs(page: int = 1, pageSize: int = 10) -> OutputsResponse:
+    allowed_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+    safe_page = max(page, 1)
+    safe_page_size = min(max(pageSize, 1), 100)
+    files: list[OutputImage] = []
+    for root_name, root_path in output_roots().items():
+        root = root_path.resolve()
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            resolved = path.resolve()
+            if root != resolved and root not in resolved.parents:
+                continue
+            if not resolved.is_file() or resolved.suffix.lower() not in allowed_suffixes:
+                continue
+
+            stat = resolved.stat()
+            relative_path = resolved.relative_to(root).as_posix()
+            subfolder = resolved.parent.relative_to(root).as_posix()
+            files.append(OutputImage(
+                name=resolved.name,
+                path=relative_path,
+                root=root_name,
+                subfolder="" if subfolder == "." else subfolder,
+                sizeBytes=stat.st_size,
+                modifiedAt=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stat.st_mtime)),
+            ))
+
+    files.sort(key=lambda item: item.modifiedAt, reverse=True)
+    total = len(files)
+    total_pages = max((total + safe_page_size - 1) // safe_page_size, 1)
+    start = (safe_page - 1) * safe_page_size
+    return OutputsResponse(
+        images=files[start:start + safe_page_size],
+        total=total,
+        page=safe_page,
+        pageSize=safe_page_size,
+        totalPages=total_pages,
+        outputsDir=str(settings.outputs_dir),
+    )
+
+
+@app.get("/outputs/file", dependencies=[Depends(require_agent_auth)])
+async def output_file(path: str, root: str = "outputs") -> Any:
+    from fastapi.responses import FileResponse
+
+    output_path = ensure_output_file(path, root)
+    media_type = mimetypes.guess_type(output_path.name)[0] or "application/octet-stream"
+    return FileResponse(output_path, media_type=media_type, filename=output_path.name)
+
+
+@app.delete("/outputs/file", dependencies=[Depends(require_agent_auth)])
+async def delete_output_file(path: str, root: str = "outputs") -> dict[str, str | bool]:
+    output_path = ensure_output_file(path, root)
+    output_path.unlink()
+    return {"deleted": True, "path": path, "root": root}
 
 
 @app.get("/logs", response_model=LogsResponse, dependencies=[Depends(require_agent_auth)])
