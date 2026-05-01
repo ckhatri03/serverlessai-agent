@@ -728,6 +728,25 @@ async def workflow_status(prompt_id: str) -> WorkflowStatusResponse:
     return WorkflowStatusResponse(promptId=prompt_id, history=response.json())
 
 
+@app.get("/view", dependencies=[Depends(require_agent_auth)])
+async def workflow_view(filename: str, subfolder: str = "", type: str = "output") -> Any:
+    from fastapi.responses import StreamingResponse
+    import io
+    
+    params = {"filename": filename, "subfolder": subfolder, "type": type}
+    try:
+        response = requests.get(f"{settings.comfyui_url.rstrip('/')}/view", params=params, timeout=30)
+        if not response.ok:
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        
+        return StreamingResponse(
+            io.BytesIO(response.content),
+            media_type=response.headers.get("Content-Type", "image/png")
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"ComfyUI unavailable: {exc}")
+
+
 @app.get("/logs", response_model=LogsResponse, dependencies=[Depends(require_agent_auth)])
 async def get_logs(path: str | None = None, lines: int = 100) -> LogsResponse:
     # Default to agent log file if no path provided
