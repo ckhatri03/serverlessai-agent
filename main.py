@@ -88,10 +88,10 @@ async def trim_comfyui_logs() -> None:
     log_path = comfyui_log_file()
     while True:
         try:
-            if log_path.exists():
-                # Use tail to get the last 100 lines and overwrite the file
+            if log_path.exists() and log_path.stat().st_size > 1024 * 1024: # Only trim if > 1MB
+                # Use tail to get the last 2000 lines and overwrite the file
                 process = await asyncio.create_subprocess_exec(
-                    "tail", "-n", "100", str(log_path),
+                    "tail", "-n", "2000", str(log_path),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
@@ -419,7 +419,8 @@ def ensure_comfyui_runtime(comfy_path: Path, log_path: Path) -> None:
         return
 
     with log_path.open("ab") as log_file:
-        log_file.write(b"Installing CUDA 11.8 Torch runtime for current ComfyUI...\n")
+        log_file.write(b"Checking for required PyTorch optimized runtime...\n")
+        log_file.write(b"Installing CUDA 11.8 Torch runtime for current ComfyUI (this may take several minutes)...\n")
         subprocess.run(
             [
                 str(python_bin),
@@ -440,6 +441,7 @@ def ensure_comfyui_runtime(comfy_path: Path, log_path: Path) -> None:
             timeout=1800,
             check=True,
         )
+        log_file.write(b"Ensuring compatible numpy version...\n")
         subprocess.run(
             [str(python_bin), "-m", "pip", "install", "numpy>=1.25,<2"],
             cwd=comfy_path,
@@ -448,6 +450,7 @@ def ensure_comfyui_runtime(comfy_path: Path, log_path: Path) -> None:
             timeout=600,
             check=True,
         )
+        log_file.write(b"Runtime verification complete.\n")
 
 
 def get_comfyui_pid() -> int | None:
@@ -505,8 +508,20 @@ def start_comfyui_process() -> ComfyUIStartResponse:
         start_new_session=True,
     )
     comfyui_pid_file().write_text(str(process.pid))
-    time.sleep(5)
-    return ComfyUIStartResponse(started=True, running=comfyui_reachable() or process.poll() is None, pid=process.pid, logPath=str(log_path))
+    
+    # Wait for ComfyUI to become ready (max 60s)
+    start_time = time.time()
+    ready = False
+    while time.time() - start_time < 60:
+        if comfyui_reachable():
+            ready = True
+            break
+        if process.poll() is not None:
+            # Process died
+            break
+        time.sleep(2)
+        
+    return ComfyUIStartResponse(started=True, running=ready, pid=process.pid, logPath=str(log_path))
 
 
 def stop_comfyui_process() -> ComfyUIStopResponse:
