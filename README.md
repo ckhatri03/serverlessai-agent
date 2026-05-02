@@ -8,6 +8,7 @@ The Python-based execution agent for RunPod / ComfyUI workers.
 ## Responsibilities
 - **Model Management:** Downloading weights from S3 or Hugging Face.
 - **Workflow Execution:** Triggering ComfyUI API with provided JSON graphs.
+- **Documentation Compatibility:** Verified with Serverless AI Control Plane UI v1.1.0+ (Asset Library Enhancements).
 - **Output Handling:** Uploading generated images/videos to secure storage.
 - **Health Monitoring:** Reporting pod status and resource utilization.
 
