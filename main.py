@@ -499,6 +499,18 @@ def start_comfyui_process() -> ComfyUIStartResponse:
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
     ensure_comfyui_runtime(comfy_path, log_path)
+    
+    # Ensure input/output symlink for UI features (Upscale, Face Detailer, etc.)
+    try:
+        input_dir = comfy_path / "input"
+        input_dir.mkdir(parents=True, exist_ok=True)
+        pod_output_symlink = input_dir / "pod_output"
+        if pod_output_symlink.exists() or pod_output_symlink.is_symlink():
+            pod_output_symlink.unlink()
+        pod_output_symlink.symlink_to(settings.outputs_dir)
+    except Exception as exc:
+        log("warning", f"failed to create pod_output symlink: {exc}")
+
     log_file = log_path.open("ab")
     process = subprocess.Popen(
         [str(python_bin), "main.py", "--listen", "0.0.0.0", "--port", "8188", "--output-directory", str(settings.outputs_dir)],
