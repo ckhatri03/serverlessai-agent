@@ -409,7 +409,7 @@ def ensure_comfyui_runtime(comfy_path: Path, log_path: Path) -> None:
         return
 
     check = subprocess.run(
-        [str(python_bin), "-c", "import torch; raise SystemExit(0 if hasattr(torch.library, 'custom_op') else 1)"],
+        [str(python_bin), "-c", "import torch; exit(0 if torch.version.cuda == '11.8' and hasattr(torch.library, 'custom_op') else 1)"],
         cwd=comfy_path,
         capture_output=True,
         text=True,
@@ -420,7 +420,7 @@ def ensure_comfyui_runtime(comfy_path: Path, log_path: Path) -> None:
 
     with log_path.open("ab") as log_file:
         log_file.write(b"Checking for required PyTorch optimized runtime...\n")
-        log_file.write(b"Installing CUDA 12.1 Torch runtime for current ComfyUI (this may take several minutes)...\n")
+        log_file.write(b"Installing CUDA 11.8 Torch runtime for current ComfyUI (this may take several minutes)...\n")
         subprocess.run(
             [
                 str(python_bin),
@@ -429,11 +429,11 @@ def ensure_comfyui_runtime(comfy_path: Path, log_path: Path) -> None:
                 "install",
                 "--upgrade",
                 "--force-reinstall",
-                "torch==2.4.1+cu121",
-                "torchvision==0.19.1+cu121",
-                "torchaudio==2.4.1+cu121",
+                "torch==2.4.1+cu118",
+                "torchvision==0.19.1+cu118",
+                "torchaudio==2.4.1+cu118",
                 "--extra-index-url",
-                "https://download.pytorch.org/whl/cu121",
+                "https://download.pytorch.org/whl/cu118",
             ],
             cwd=comfy_path,
             stdout=log_file,
