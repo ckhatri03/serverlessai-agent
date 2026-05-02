@@ -485,13 +485,31 @@ def comfyui_running() -> bool:
     return comfyui_reachable() or process_running(get_comfyui_pid())
 
 
+def ensure_comfyui_input_aliases(comfy_path: Path) -> None:
+    # LoadImage can only read from ComfyUI's input tree. These aliases let
+    # gallery actions reuse files that were written to either known output root.
+    aliases = {"pod_output": settings.outputs_dir}
+    comfy_output = comfy_path / "output"
+    if comfy_output.resolve() != settings.outputs_dir.resolve():
+        aliases["comfy_output"] = comfy_output
+
+    input_dir = comfy_path / "input"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    for alias, target in aliases.items():
+        target.mkdir(parents=True, exist_ok=True)
+        symlink_path = input_dir / alias
+        if symlink_path.is_symlink() or symlink_path.is_file():
+            symlink_path.unlink()
+        elif symlink_path.exists():
+            log("warning", f"failed to create {alias} symlink: {symlink_path} already exists and is not a symlink")
+            continue
+        symlink_path.symlink_to(target)
+
+
 def start_comfyui_process() -> ComfyUIStartResponse:
     comfy_path = get_comfyui_path_for_management()
     pid = get_comfyui_pid()
     log_path = comfyui_log_file()
-
-    if comfyui_running():
-        return ComfyUIStartResponse(started=False, running=True, pid=pid, logPath=str(log_path))
 
     python_bin = comfy_path / "venv" / "bin" / "python3"
     if not python_bin.exists():
@@ -499,17 +517,15 @@ def start_comfyui_process() -> ComfyUIStartResponse:
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
     ensure_comfyui_runtime(comfy_path, log_path)
-    
-    # Ensure input/output symlink for UI features (Upscale, Face Detailer, etc.)
+
+    # Ensure input/output symlinks for UI features (Upscale, Face Detailer, etc.).
     try:
-        input_dir = comfy_path / "input"
-        input_dir.mkdir(parents=True, exist_ok=True)
-        pod_output_symlink = input_dir / "pod_output"
-        if pod_output_symlink.exists() or pod_output_symlink.is_symlink():
-            pod_output_symlink.unlink()
-        pod_output_symlink.symlink_to(settings.outputs_dir)
+        ensure_comfyui_input_aliases(comfy_path)
     except Exception as exc:
-        log("warning", f"failed to create pod_output symlink: {exc}")
+        log("warning", f"failed to create ComfyUI input symlinks: {exc}")
+
+    if comfyui_running():
+        return ComfyUIStartResponse(started=False, running=True, pid=pid, logPath=str(log_path))
 
     log_file = log_path.open("ab")
     process = subprocess.Popen(
