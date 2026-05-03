@@ -275,6 +275,17 @@ class Image2VideoRequest(BaseModel):
     fps: int = 16
 
 
+class UpscaleRequest(BaseModel):
+    image: str  # Source image (path or URL)
+    upscale_model_id: str | None = None  # e.g. 4x-UltraSharp.pth
+    upscale_factor: float = 4.0
+
+
+class UpscaleResponse(BaseModel):
+    image_path: str
+    duration: float
+
+
 def require_agent_auth(authorization: str | None = Header(default=None)) -> None:
     if not settings.agent_token:
         return
@@ -518,6 +529,17 @@ class PipelineManager:
                     model_id, torch_dtype=dtype, use_safetensors=True, token=settings.hf_token or None
                 )
             
+            # Auto-load embeddings from /workspace/models/embeddings
+            embeddings_dir = settings.models_dir / "embeddings"
+            if embeddings_dir.exists() and hasattr(self.pipeline, "load_textual_inversion"):
+                for emb_file in embeddings_dir.rglob("*"):
+                    if emb_file.is_file() and emb_file.suffix in {".pt", ".bin", ".safetensors"}:
+                        try:
+                            self.pipeline.load_textual_inversion(str(emb_file))
+                            log("info", f"Loaded embedding: {emb_file.name}")
+                        except Exception as e:
+                            log("warning", f"Failed to load embedding {emb_file.name}: {e}")
+
             if torch.cuda.is_available():
                 self.pipeline.enable_model_cpu_offload()
             
@@ -530,6 +552,58 @@ class PipelineManager:
 
 
 pipeline_manager = PipelineManager()
+
+
+@app.post("/api/v1/upscale", response_model=UpscaleResponse, dependencies=[Depends(require_agent_auth)])
+async def upscale_image(request: UpscaleRequest) -> UpscaleResponse:
+    start_time = time.time()
+    from spandrel import ImageModelDescriptor, ModelLoader
+    
+    img = load_image_any(request.image)
+    
+    model_path = None
+    if request.upscale_model_id:
+        # Check in models/upscale_models
+        check_path = settings.models_dir / "upscale_models" / request.upscale_model_id
+        if check_path.exists():
+            model_path = check_path
+    
+    if not model_path:
+        # Default fallback or error
+        # In a production app, we'd have a default ESRGAN model downloaded
+        raise HTTPException(status_code=400, detail="Upscale model not found. Please download 4x-UltraSharp.pth to /workspace/models/upscale_models/")
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    loader = ModelLoader()
+    model = loader.load_from_file(str(model_path)).to(device).eval()
+    
+    import numpy as np
+    # Convert PIL to tensor
+    img_np = np.array(img).transpose(2, 0, 1) / 255.0
+    img_tensor = torch.from_numpy(img_np).float().unsqueeze(0).to(device)
+    
+    with torch.no_grad():
+        output_tensor = model(img_tensor)
+    
+    # Convert back to PIL
+    output_np = output_tensor.squeeze(0).cpu().numpy().transpose(1, 2, 0)
+    output_np = (output_np.clip(0, 1) * 255.0).astype(np.uint8)
+    output_img = Image.fromarray(output_np)
+    
+    # If a specific factor is requested and model doesn't match, resize
+    if request.upscale_factor != 4.0: # Assuming most models are 4x
+         new_w = int(img.width * request.upscale_factor)
+         new_h = int(img.height * request.upscale_factor)
+         output_img = output_img.resize((new_w, new_h), Image.LANCZOS)
+
+    filename = f"upscale_{uuid.uuid4()}.png"
+    save_path = settings.outputs_dir / filename
+    output_img.save(save_path)
+    
+    return UpscaleResponse(
+        image_path=str(save_path),
+        duration=time.time() - start_time
+    )
 
 
 def load_image_any(image_src: str) -> Image.Image:
