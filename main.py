@@ -33,6 +33,8 @@ class Settings(BaseModel):
     public_url: str = Field(default_factory=lambda: os.getenv("SERVERLESSAI_AGENT_PUBLIC_URL", ""))
     agent_log_file: Path = Field(default_factory=lambda: Path(os.getenv("SERVERLESSAI_AGENT_LOG_FILE", "/workspace/agent.log")))
     auto_start_comfyui: bool = Field(default_factory=lambda: os.getenv("SERVERLESSAI_AUTO_START_COMFYUI", "true").lower() == "true")
+    hf_token: str = Field(default_factory=lambda: os.getenv("HF_TOKEN", ""))
+    hf_home: Path = Field(default_factory=lambda: Path(os.getenv("HF_HOME", "/workspace/huggingface")))
 
     @property
     def effective_public_url(self) -> str:
@@ -166,7 +168,9 @@ class ComfyUIInfoResponse(BaseModel):
 
 
 class DownloadModelRequest(BaseModel):
-    url: str
+    url: str | None = None
+    repo_id: str | None = None
+    filename: str | None = None
     destination: str
     overwrite: bool = False
 
@@ -764,6 +768,29 @@ async def download_model(request: DownloadModelRequest) -> DownloadModelResponse
         return DownloadModelResponse(path=str(target), bytes=target.stat().st_size)
 
     target.parent.mkdir(parents=True, exist_ok=True)
+
+    if request.repo_id:
+        from huggingface_hub import hf_hub_download
+        try:
+            path = hf_hub_download(
+                repo_id=request.repo_id,
+                filename=request.filename,
+                local_dir=target.parent,
+                local_dir_use_symlinks=False,
+                token=settings.hf_token or None
+            )
+            downloaded_path = Path(path)
+            if downloaded_path.resolve() != target.resolve():
+                if target.exists():
+                    target.unlink()
+                downloaded_path.replace(target)
+            return DownloadModelResponse(path=str(target), bytes=target.stat().st_size)
+        except Exception as exc:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"HF Download failed: {exc}")
+
+    if not request.url:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Either url or repo_id must be provided")
+
     temporary_target = target.with_suffix(target.suffix + ".download")
 
     try:
