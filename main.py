@@ -14,7 +14,7 @@ from typing import Any
 import requests
 import torch
 from PIL import Image
-from diffusers import AutoPipelineForText2Image, AutoPipelineForImage2Image
+from diffusers import AutoPipelineForText2Image, AutoPipelineForImage2Image, ControlNetModel, StableDiffusionControlNetPipeline
 from fastapi import Depends, FastAPI, Header, HTTPException, status, UploadFile, File
 from pydantic import BaseModel, Field, HttpUrl
 
@@ -313,6 +313,33 @@ class InferenceResponse(BaseModel):
     image_path: str
     seed: int
     duration: float
+
+
+class ControlNetRequest(BaseModel):
+    model_id: str
+    controlnet_model_id: str
+    image: str  # Control image (path or URL)
+    prompt: str
+    negative_prompt: str | None = None
+    controlnet_conditioning_scale: float = 1.0
+    width: int = 1024
+    height: int = 1024
+    num_inference_steps: int = 30
+    guidance_scale: float = 7.5
+    seed: int = -1
+
+
+class FaceSwapRequest(BaseModel):
+    source_image: str  # Face to use (path or URL)
+    target_image: str  # Image to swap face into (path or URL)
+    model_path: str | None = None  # Path to inswapper model
+
+
+class OpenPoseRequest(BaseModel):
+    image: str  # Source image (path or URL)
+    include_body: bool = True
+    include_hand: bool = False
+    include_face: bool = False
 
 
 def require_agent_auth(authorization: str | None = Header(default=None)) -> None:
@@ -843,11 +870,12 @@ async def download_model(request: DownloadModelRequest) -> DownloadModelResponse
 class PipelineManager:
     def __init__(self):
         self.current_model_id = None
+        self.current_controlnet_id = None
         self.pipeline = None
-        self.type = None # "t2i" or "i2v" etc.
+        self.type = None # "t2i", "i2i", "controlnet"
 
-    def load_pipeline(self, model_id: str, task: str = "t2i"):
-        if self.current_model_id == model_id and self.type == task and self.pipeline is not None:
+    def load_pipeline(self, model_id: str, task: str = "t2i", controlnet_id: str | None = None):
+        if self.current_model_id == model_id and self.type == task and self.current_controlnet_id == controlnet_id and self.pipeline is not None:
             return self.pipeline
 
         # Clear memory
@@ -872,11 +900,27 @@ class PipelineManager:
                     use_safetensors=True,
                     token=settings.hf_token or None
                 )
+            elif task == "controlnet":
+                controlnet = ControlNetModel.from_pretrained(controlnet_id, torch_dtype=dtype)
+                # Use SDXL or SD1.5 based on model_id hint or just AutoPipeline if it supports controlnet
+                # For ControlNet, explicit pipeline is often safer
+                from diffusers import StableDiffusionControlNetPipeline, StableDiffusionXLControlNetPipeline
+                
+                # Simple check for SDXL
+                if "xl" in model_id.lower():
+                    self.pipeline = StableDiffusionXLControlNetPipeline.from_pretrained(
+                        model_id, controlnet=controlnet, torch_dtype=dtype, use_safetensors=True, token=settings.hf_token or None
+                    )
+                else:
+                    self.pipeline = StableDiffusionControlNetPipeline.from_pretrained(
+                        model_id, controlnet=controlnet, torch_dtype=dtype, use_safetensors=True, token=settings.hf_token or None
+                    )
             
             if torch.cuda.is_available():
                 self.pipeline.enable_model_cpu_offload()
             
             self.current_model_id = model_id
+            self.current_controlnet_id = controlnet_id
             self.type = task
             return self.pipeline
         except Exception as exc:
@@ -884,6 +928,24 @@ class PipelineManager:
 
 
 pipeline_manager = PipelineManager()
+
+
+def load_image_any(image_src: str) -> Image.Image:
+    if image_src.startswith(("http://", "https://")):
+        from diffusers.utils import load_image
+        return load_image(image_src).convert("RGB")
+    
+    image_path = Path(image_src)
+    if not image_path.is_absolute():
+        comfy_path = get_comfyui_path()
+        if comfy_path:
+            image_path = comfy_path / "input" / image_src
+        else:
+            image_path = settings.workspace_dir / image_src
+    
+    if not image_path.exists():
+         raise HTTPException(status_code=404, detail=f"Image not found: {image_src}")
+    return Image.open(image_path).convert("RGB")
 
 
 @app.post("/api/v1/txt2img", response_model=InferenceResponse, dependencies=[Depends(require_agent_auth)])
@@ -919,25 +981,7 @@ async def txt2img(request: Text2ImageRequest) -> InferenceResponse:
 async def img2img(request: Image2ImageRequest) -> InferenceResponse:
     start_time = time.time()
     pipe = pipeline_manager.load_pipeline(request.model_id, "i2i")
-    
-    # Load source image
-    if request.image.startswith(("http://", "https://")):
-        from diffusers.utils import load_image
-        init_image = load_image(request.image)
-    else:
-        # Assume relative to input dir or absolute
-        image_path = Path(request.image)
-        if not image_path.is_absolute():
-            # Try comfyui input root if available
-            comfy_path = get_comfyui_path()
-            if comfy_path:
-                image_path = comfy_path / "input" / request.image
-            else:
-                image_path = settings.workspace_dir / request.image
-        
-        if not image_path.exists():
-             raise HTTPException(status_code=404, detail="Source image not found")
-        init_image = Image.open(image_path).convert("RGB")
+    init_image = load_image_any(request.image)
 
     seed = request.seed if request.seed != -1 else torch.Generator().seed()
     generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(seed)
@@ -961,6 +1005,107 @@ async def img2img(request: Image2ImageRequest) -> InferenceResponse:
         seed=seed,
         duration=time.time() - start_time
     )
+
+
+@app.post("/api/v1/controlnet", response_model=InferenceResponse, dependencies=[Depends(require_agent_auth)])
+async def controlnet_inference(request: ControlNetRequest) -> InferenceResponse:
+    start_time = time.time()
+    pipe = pipeline_manager.load_pipeline(request.model_id, "controlnet", request.controlnet_model_id)
+    control_image = load_image_any(request.image)
+
+    seed = request.seed if request.seed != -1 else torch.Generator().seed()
+    generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(seed)
+    
+    output = pipe(
+        prompt=request.prompt,
+        negative_prompt=request.negative_prompt,
+        image=control_image,
+        controlnet_conditioning_scale=request.controlnet_conditioning_scale,
+        width=request.width,
+        height=request.height,
+        num_inference_steps=request.num_inference_steps,
+        guidance_scale=request.guidance_scale,
+        generator=generator,
+    ).images[0]
+    
+    filename = f"{uuid.uuid4()}.png"
+    save_path = settings.outputs_dir / filename
+    output.save(save_path)
+    
+    return InferenceResponse(
+        image_path=str(save_path),
+        seed=seed,
+        duration=time.time() - start_time
+    )
+
+
+@app.post("/api/v1/faceswap", response_model=InferenceResponse, dependencies=[Depends(require_agent_auth)])
+async def faceswap(request: FaceSwapRequest) -> InferenceResponse:
+    start_time = time.time()
+    import cv2
+    import numpy as np
+    import insightface
+    from insightface.app import FaceAnalysis
+
+    source_img = cv2.cvtColor(np.array(load_image_any(request.source_image)), cv2.COLOR_RGB2BGR)
+    target_img = cv2.cvtColor(np.array(load_image_any(request.target_image)), cv2.COLOR_RGB2BGR)
+
+    app = FaceAnalysis(name='antelopev2', root=str(settings.hf_home))
+    app.prepare(ctx_id=0, det_size=(640, 640))
+
+    source_faces = app.get(source_img)
+    target_faces = app.get(target_img)
+
+    if not source_faces:
+        raise HTTPException(status_code=400, detail="No face detected in source image")
+    if not target_faces:
+        raise HTTPException(status_code=400, detail="No face detected in target image")
+
+    # Load swapper model
+    model_path = request.model_path
+    if not model_path:
+        # Default location or download
+        model_path = settings.models_dir / "inswapper_128.onnx"
+        if not model_path.exists():
+            # In a real app we might auto-download here
+            raise HTTPException(status_code=400, detail="inswapper_128.onnx model not found in models directory")
+    
+    swapper = insightface.model_zoo.get_model(str(model_path), download=False, check_flags=False)
+    
+    res = target_img.copy()
+    # Swap first face found in both
+    res = swapper.get(res, target_faces[0], source_faces[0], paste_back=True)
+
+    filename = f"{uuid.uuid4()}.png"
+    save_path = settings.outputs_dir / filename
+    cv2.imwrite(str(save_path), res)
+    
+    return InferenceResponse(
+        image_path=str(save_path),
+        seed=0,
+        duration=time.time() - start_time
+    )
+
+
+@app.post("/api/v1/preprocess/openpose", response_model=dict[str, str], dependencies=[Depends(require_agent_auth)])
+async def preprocess_openpose(request: OpenPoseRequest) -> dict[str, str]:
+    from controlnet_aux import OpenposeDetector
+    
+    img = load_image_any(request.image)
+    processor = OpenposeDetector.from_pretrained("lllyasviel/ControlNet")
+    
+    processed_image = processor(
+        img, 
+        include_body=request.include_body, 
+        include_hand=request.include_hand, 
+        include_face=request.include_face
+    )
+    
+    filename = f"pose_{uuid.uuid4()}.png"
+    save_path = settings.outputs_dir / filename
+    processed_image.save(save_path)
+    
+    return {"image_path": str(save_path)}
 
 
 @app.post("/install-workflow", response_model=InstallWorkflowResponse, dependencies=[Depends(require_agent_auth)])
