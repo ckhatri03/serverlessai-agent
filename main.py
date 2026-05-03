@@ -15,6 +15,8 @@ import requests
 import torch
 from PIL import Image
 from diffusers import AutoPipelineForText2Image, AutoPipelineForImage2Image, ControlNetModel, StableDiffusionControlNetPipeline
+from diffusers import WanPipeline, WanImageToVideoPipeline
+from diffusers.utils import export_to_video
 from fastapi import Depends, FastAPI, Header, HTTPException, status, UploadFile, File
 from pydantic import BaseModel, Field, HttpUrl
 
@@ -340,6 +342,33 @@ class OpenPoseRequest(BaseModel):
     include_body: bool = True
     include_hand: bool = False
     include_face: bool = False
+
+
+class Text2VideoRequest(BaseModel):
+    model_id: str
+    prompt: str
+    negative_prompt: str | None = None
+    width: int = 832
+    height: int = 480
+    num_frames: int = 81
+    num_inference_steps: int = 50
+    guidance_scale: float = 6.0
+    seed: int = -1
+    fps: int = 16
+
+
+class Image2VideoRequest(BaseModel):
+    model_id: str
+    image: str  # Source image (path or URL)
+    prompt: str
+    negative_prompt: str | None = None
+    width: int = 1280
+    height: int = 720
+    num_frames: int = 81
+    num_inference_steps: int = 50
+    guidance_scale: float = 5.0
+    seed: int = -1
+    fps: int = 16
 
 
 def require_agent_auth(authorization: str | None = Header(default=None)) -> None:
@@ -902,11 +931,7 @@ class PipelineManager:
                 )
             elif task == "controlnet":
                 controlnet = ControlNetModel.from_pretrained(controlnet_id, torch_dtype=dtype)
-                # Use SDXL or SD1.5 based on model_id hint or just AutoPipeline if it supports controlnet
-                # For ControlNet, explicit pipeline is often safer
                 from diffusers import StableDiffusionControlNetPipeline, StableDiffusionXLControlNetPipeline
-                
-                # Simple check for SDXL
                 if "xl" in model_id.lower():
                     self.pipeline = StableDiffusionXLControlNetPipeline.from_pretrained(
                         model_id, controlnet=controlnet, torch_dtype=dtype, use_safetensors=True, token=settings.hf_token or None
@@ -915,6 +940,16 @@ class PipelineManager:
                     self.pipeline = StableDiffusionControlNetPipeline.from_pretrained(
                         model_id, controlnet=controlnet, torch_dtype=dtype, use_safetensors=True, token=settings.hf_token or None
                     )
+            elif task == "t2v":
+                # Primarily Wan 2.1 support
+                self.pipeline = WanPipeline.from_pretrained(
+                    model_id, torch_dtype=dtype, use_safetensors=True, token=settings.hf_token or None
+                )
+            elif task == "i2v":
+                # Primarily Wan 2.1 support
+                self.pipeline = WanImageToVideoPipeline.from_pretrained(
+                    model_id, torch_dtype=dtype, use_safetensors=True, token=settings.hf_token or None
+                )
             
             if torch.cuda.is_available():
                 self.pipeline.enable_model_cpu_offload()
@@ -1085,6 +1120,68 @@ async def faceswap(request: FaceSwapRequest) -> InferenceResponse:
         seed=0,
         duration=time.time() - start_time
     )
+
+
+@app.post("/api/v1/txt2vid", response_model=dict[str, Any], dependencies=[Depends(require_agent_auth)])
+async def txt2vid(request: Text2VideoRequest) -> dict[str, Any]:
+    start_time = time.time()
+    pipe = pipeline_manager.load_pipeline(request.model_id, "t2v")
+    
+    seed = request.seed if request.seed != -1 else torch.Generator().seed()
+    generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(seed)
+    
+    video = pipe(
+        prompt=request.prompt,
+        negative_prompt=request.negative_prompt,
+        width=request.width,
+        height=request.height,
+        num_frames=request.num_frames,
+        num_inference_steps=request.num_inference_steps,
+        guidance_scale=request.guidance_scale,
+        generator=generator,
+    ).frames[0]
+    
+    filename = f"{uuid.uuid4()}.mp4"
+    save_path = settings.outputs_dir / filename
+    export_to_video(video, str(save_path), fps=request.fps)
+    
+    return {
+        "video_path": str(save_path),
+        "seed": seed,
+        "duration": time.time() - start_time
+    }
+
+
+@app.post("/api/v1/img2vid", response_model=dict[str, Any], dependencies=[Depends(require_agent_auth)])
+async def img2vid(request: Image2VideoRequest) -> dict[str, Any]:
+    start_time = time.time()
+    pipe = pipeline_manager.load_pipeline(request.model_id, "i2v")
+    init_image = load_image_any(request.image)
+    
+    seed = request.seed if request.seed != -1 else torch.Generator().seed()
+    generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(seed)
+    
+    video = pipe(
+        image=init_image,
+        prompt=request.prompt,
+        negative_prompt=request.negative_prompt,
+        width=request.width,
+        height=request.height,
+        num_frames=request.num_frames,
+        num_inference_steps=request.num_inference_steps,
+        guidance_scale=request.guidance_scale,
+        generator=generator,
+    ).frames[0]
+    
+    filename = f"{uuid.uuid4()}.mp4"
+    save_path = settings.outputs_dir / filename
+    export_to_video(video, str(save_path), fps=request.fps)
+    
+    return {
+        "video_path": str(save_path),
+        "seed": seed,
+        "duration": time.time() - start_time
+    }
 
 
 @app.post("/api/v1/preprocess/openpose", response_model=dict[str, str], dependencies=[Depends(require_agent_auth)])
