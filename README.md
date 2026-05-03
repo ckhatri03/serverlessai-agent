@@ -1,83 +1,49 @@
-# serverlessai-agent
+# Serverless AI Agent
 
-The Python-based execution agent for RunPod / ComfyUI workers.
+The Python-based execution agent for RunPod workers.
 
-## Overview
-`serverlessai-agent` is the lightweight worker that runs inside GPU pods. It acts as the bridge between the `serverlessai` control plane and the AI execution environment (ComfyUI).
+`serverlessai-agent` is the lightweight worker that runs inside GPU pods. It acts as the bridge between the `serverlessai` control plane and the native Python AI inference environment using `diffusers`, `transformers`, and other core libraries.
 
-## Responsibilities
-- **Model Management:** Downloading weights from S3 or Hugging Face.
-- **Workflow Execution:** Triggering ComfyUI API with provided JSON graphs.
-- **Documentation Compatibility:** Verified with Serverless AI Control Plane UI v1.1.0+ (Asset Library Enhancements).
-- **Output Handling:** Uploading generated images/videos to secure storage.
-- **Health Monitoring:** Reporting pod status and resource utilization.
+## Features
 
-## Tech Stack
-- **Language:** Python 3.10+
-- **Framework:** FastAPI / Uvicorn
-- **AI Tooling:** ComfyUI, PyTorch
-- **Communication:** REST API
+- **Automated Registration:** Self-registers with the Go control plane on startup.
+- **Native Inference:** Supports `txt2img`, `img2img`, `txt2vid`, `img2vid`, `faceswap`, and `controlnet` using standard Python pipelines.
+- **Optimized Execution:** Uses PyTorch, CUDA, and `xformers` for high-performance inference.
+- **Memory Management:** Implements dynamic model offloading to support large models (like Flux.1) on consumer-grade hardware.
+- **Model Management:** Native support for downloading models directly from Hugging Face and Civitai.
+- **Secure Commands:** Restricted `/exec` endpoint for administrative tasks and dependency management.
 
-## Runtime Contract
+## Environment Variables
 
-The agent is designed to run inside the RunPod instance provisioned by the `serverlessai` control plane. The control plane owns pod lifecycle and calls the agent over HTTP after the pod is reachable.
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `PORT` | `8000` | Port the agent API listens on. |
+| `SERVERLESSAI_AGENT_TOKEN` | | Optional permanent token (bypass registration). |
+| `SERVERLESSAI_AGENT_REGISTER_TOKEN` | | Token used to register with the control plane. |
+| `SERVERLESSAI_CONTROL_PLANE_URL` | | URL of the Go control plane. |
+| `WORKSPACE_DIR` | `/workspace` | Root workspace directory. |
+| `MODELS_DIR` | `/workspace/models` | Where model weights are stored. |
+| `OUTPUTS_DIR` | `/workspace/output` | Where generated media is saved. |
+| `HF_TOKEN` | | Hugging Face token for private models. |
 
-### Environment Variables
+## API Reference (Partial)
 
-| Name | Default | Purpose |
-| --- | --- | --- |
-| `PORT` | `8000` | Agent HTTP port. |
-| `SERVERLESSAI_AGENT_TOKEN` | empty | Optional bearer token required by all non-health endpoints. |
-| `SERVERLESSAI_AGENT_TOKEN_FILE` | `/workspace/.serverlessai-agent-token` | File used to persist the permanent agent token after registration. |
-| `SERVERLESSAI_AGENT_REGISTER_TOKEN` | empty | One-time control-plane registration token injected by the generated RunPod template. |
-| `SERVERLESSAI_CONTROL_PLANE_URL` | empty | Future callback URL for job/status reporting. |
-| `SERVERLESSAI_AGENT_PUBLIC_URL` | empty | Public URL assigned to this pod/agent by RunPod. |
-| `SERVERLESSAI_REQUIRE_CUDA` | `true` | Installer fails before registration unless CUDA is visible through `nvidia-smi` or `nvcc`. |
-| `SERVERLESSAI_REQUIRE_PYTORCH` | `true` | Installer fails before registration unless PyTorch imports and CUDA is available to PyTorch. |
-| `COMFYUI_URL` | `http://127.0.0.1:8188` | ComfyUI API base URL inside the pod. |
-| `WORKSPACE_DIR` | `/workspace` | Base persistent workspace path. |
-| `MODELS_DIR` | `/workspace/models` | Safe root for model downloads. |
-| `OUTPUTS_DIR` | `/workspace/output` | Safe root for generated outputs. |
-| `WORKFLOWS_DIR` | `/workspace/workflows` | Safe root for saved workflow JSON. |
-| `RUNPOD_POD_ID` | empty | RunPod pod id when provided by the runtime/template. |
+| Method | Path | Auth | Description |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/health` | no | Basic liveness check. |
+| `GET` | `/status` | yes | Agent and workspace status. |
+| `POST` | `/api/v1/txt2img` | yes | Generate image from text. |
+| `POST` | `/api/v1/img2img` | yes | Generate image from image. |
+| `POST` | `/api/v1/txt2vid` | yes | Generate video from text (e.g. Wan 2.1). |
+| `POST` | `/api/v1/faceswap` | yes | Swap faces between images. |
+| `POST` | `/download-model` | yes | Trigger a model download to the pod. |
+| `POST` | `/exec` | yes | Run arbitrary shell commands. |
 
-### Endpoints
+## Installation
 
-| Method | Path | Auth | Purpose |
-| --- | --- | --- | --- |
-| `GET` | `/health` | no | Readiness check for RunPod/control plane. |
-| `GET` | `/status` | yes | Agent, workspace, and ComfyUI status. |
-| `POST` | `/download-model` | yes | Download a model file under `MODELS_DIR`. |
-| `POST` | `/install-workflow` | yes | Save a ComfyUI workflow graph under `WORKFLOWS_DIR`. |
-| `POST` | `/run-workflow` | yes | Submit a workflow graph to ComfyUI `/prompt`. |
-| `GET` | `/status/{prompt_id}` | yes | Fetch ComfyUI history for a prompt. |
-| `POST` | `/upload-output` | yes | Upload an output file to a signed destination URL. |
-| `POST` | `/shutdown` | yes | Stop the agent process; pod termination remains control-plane owned. |
-
-When `SERVERLESSAI_AGENT_TOKEN` is set, send:
-
-```http
-Authorization: Bearer <token>
-```
-
-## RunPod Usage
-
-The public repository can be used in a generated RunPod template by injecting `SERVERLESSAI_AGENT_REGISTER_TOKEN`,
-`SERVERLESSAI_CONTROL_PLANE_URL`, and an install script URL. The template startup command can install and run the agent
-without building a custom image:
+The agent is typically installed via the `install.sh` script provided by the control plane when a pod is provisioned.
 
 ```bash
-curl -fsSL "$SERVERLESSAI_AGENT_INSTALL_URL" | sh
+# Manual start
+./start-agent.sh
 ```
-
-The installer updates Ubuntu packages when `apt-get` is available, verifies Python, pip, curl, CUDA, and PyTorch before
-starting the agent. Registration happens only after these readiness checks pass.
-
-The agent expects ComfyUI to be reachable from inside the same pod at `COMFYUI_URL`.
-
-## Documentation
-- [Disclaimer](./DISCLAIMER.md)
-- [License](./LICENSE)
-
----
-© 2026 Chirayu Khatri / Rectrix. All rights reserved.

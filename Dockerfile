@@ -6,8 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     WORKSPACE_DIR=/workspace \
     MODELS_DIR=/workspace/models \
     OUTPUTS_DIR=/workspace/output \
-    WORKFLOWS_DIR=/workspace/workflows \
-    COMFYUI_URL=http://127.0.0.1:8188
+    WORKFLOWS_DIR=/workspace/workflows
 
 WORKDIR /app
 
