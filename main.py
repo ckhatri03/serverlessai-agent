@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import Any
 
 import requests
+import torch
+from PIL import Image
+from diffusers import AutoPipelineForText2Image, AutoPipelineForImage2Image
 from fastapi import Depends, FastAPI, Header, HTTPException, status, UploadFile, File
 from pydantic import BaseModel, Field, HttpUrl
 
@@ -280,6 +283,36 @@ class UploadOutputResponse(BaseModel):
 
 class ShutdownRequest(BaseModel):
     terminatePod: bool = False
+
+
+class Text2ImageRequest(BaseModel):
+    model_id: str
+    prompt: str
+    negative_prompt: str | None = None
+    width: int = 1024
+    height: int = 1024
+    num_inference_steps: int = 30
+    guidance_scale: float = 7.5
+    seed: int = -1
+    scheduler: str | None = None
+
+
+class Image2ImageRequest(BaseModel):
+    model_id: str
+    image: str  # File path relative to input root or URL
+    prompt: str
+    negative_prompt: str | None = None
+    strength: float = 0.8
+    num_inference_steps: int = 30
+    guidance_scale: float = 7.5
+    seed: int = -1
+    scheduler: str | None = None
+
+
+class InferenceResponse(BaseModel):
+    image_path: str
+    seed: int
+    duration: float
 
 
 def require_agent_auth(authorization: str | None = Header(default=None)) -> None:
@@ -805,6 +838,129 @@ async def download_model(request: DownloadModelRequest) -> DownloadModelResponse
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Download failed: {exc}") from exc
 
     return DownloadModelResponse(path=str(target), bytes=target.stat().st_size)
+
+
+class PipelineManager:
+    def __init__(self):
+        self.current_model_id = None
+        self.pipeline = None
+        self.type = None # "t2i" or "i2v" etc.
+
+    def load_pipeline(self, model_id: str, task: str = "t2i"):
+        if self.current_model_id == model_id and self.type == task and self.pipeline is not None:
+            return self.pipeline
+
+        # Clear memory
+        self.pipeline = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+        
+        try:
+            if task == "t2i":
+                self.pipeline = AutoPipelineForText2Image.from_pretrained(
+                    model_id, 
+                    torch_dtype=dtype, 
+                    use_safetensors=True,
+                    token=settings.hf_token or None
+                )
+            elif task == "i2i":
+                self.pipeline = AutoPipelineForImage2Image.from_pretrained(
+                    model_id, 
+                    torch_dtype=dtype, 
+                    use_safetensors=True,
+                    token=settings.hf_token or None
+                )
+            
+            if torch.cuda.is_available():
+                self.pipeline.enable_model_cpu_offload()
+            
+            self.current_model_id = model_id
+            self.type = task
+            return self.pipeline
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to load pipeline: {exc}")
+
+
+pipeline_manager = PipelineManager()
+
+
+@app.post("/api/v1/txt2img", response_model=InferenceResponse, dependencies=[Depends(require_agent_auth)])
+async def txt2img(request: Text2ImageRequest) -> InferenceResponse:
+    start_time = time.time()
+    pipe = pipeline_manager.load_pipeline(request.model_id, "t2i")
+    
+    seed = request.seed if request.seed != -1 else torch.Generator().seed()
+    generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(seed)
+    
+    output = pipe(
+        prompt=request.prompt,
+        negative_prompt=request.negative_prompt,
+        width=request.width,
+        height=request.height,
+        num_inference_steps=request.num_inference_steps,
+        guidance_scale=request.guidance_scale,
+        generator=generator,
+    ).images[0]
+    
+    filename = f"{uuid.uuid4()}.png"
+    save_path = settings.outputs_dir / filename
+    output.save(save_path)
+    
+    return InferenceResponse(
+        image_path=str(save_path),
+        seed=seed,
+        duration=time.time() - start_time
+    )
+
+
+@app.post("/api/v1/img2img", response_model=InferenceResponse, dependencies=[Depends(require_agent_auth)])
+async def img2img(request: Image2ImageRequest) -> InferenceResponse:
+    start_time = time.time()
+    pipe = pipeline_manager.load_pipeline(request.model_id, "i2i")
+    
+    # Load source image
+    if request.image.startswith(("http://", "https://")):
+        from diffusers.utils import load_image
+        init_image = load_image(request.image)
+    else:
+        # Assume relative to input dir or absolute
+        image_path = Path(request.image)
+        if not image_path.is_absolute():
+            # Try comfyui input root if available
+            comfy_path = get_comfyui_path()
+            if comfy_path:
+                image_path = comfy_path / "input" / request.image
+            else:
+                image_path = settings.workspace_dir / request.image
+        
+        if not image_path.exists():
+             raise HTTPException(status_code=404, detail="Source image not found")
+        init_image = Image.open(image_path).convert("RGB")
+
+    seed = request.seed if request.seed != -1 else torch.Generator().seed()
+    generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(seed)
+    
+    output = pipe(
+        prompt=request.prompt,
+        negative_prompt=request.negative_prompt,
+        image=init_image,
+        strength=request.strength,
+        num_inference_steps=request.num_inference_steps,
+        guidance_scale=request.guidance_scale,
+        generator=generator,
+    ).images[0]
+    
+    filename = f"{uuid.uuid4()}.png"
+    save_path = settings.outputs_dir / filename
+    output.save(save_path)
+    
+    return InferenceResponse(
+        image_path=str(save_path),
+        seed=seed,
+        duration=time.time() - start_time
+    )
 
 
 @app.post("/install-workflow", response_model=InstallWorkflowResponse, dependencies=[Depends(require_agent_auth)])
