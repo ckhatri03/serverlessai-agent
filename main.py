@@ -201,6 +201,8 @@ class Text2ImageRequest(BaseModel):
     guidance_scale: float = 7.5
     seed: int = -1
     scheduler: str | None = None
+    loras: list[dict] = []
+    embeddings: list[dict] = []
 
 
 class Image2ImageRequest(BaseModel):
@@ -213,6 +215,8 @@ class Image2ImageRequest(BaseModel):
     guidance_scale: float = 7.5
     seed: int = -1
     scheduler: str | None = None
+    loras: list[dict] = []
+    embeddings: list[dict] = []
 
 
 class InferenceResponse(BaseModel):
@@ -233,6 +237,8 @@ class ControlNetRequest(BaseModel):
     num_inference_steps: int = 30
     guidance_scale: float = 7.5
     seed: int = -1
+    loras: list[dict] = []
+    embeddings: list[dict] = []
 
 
 class FaceSwapRequest(BaseModel):
@@ -259,6 +265,8 @@ class Text2VideoRequest(BaseModel):
     guidance_scale: float = 6.0
     seed: int = -1
     fps: int = 16
+    loras: list[dict] = []
+    embeddings: list[dict] = []
 
 
 class Image2VideoRequest(BaseModel):
@@ -273,6 +281,8 @@ class Image2VideoRequest(BaseModel):
     guidance_scale: float = 5.0
     seed: int = -1
     fps: int = 16
+    loras: list[dict] = []
+    embeddings: list[dict] = []
 
 
 class UpscaleRequest(BaseModel):
@@ -492,6 +502,7 @@ class PipelineManager:
         self.current_controlnet_id = None
         self.pipeline = None
         self.type = None # "t2i", "i2i", "controlnet"
+        self.has_loras = False
 
     def resolve_model_id(self, model_id: str) -> str:
         mappings = {
@@ -509,11 +520,13 @@ class PipelineManager:
 
     def load_pipeline(self, model_id: str, task: str = "t2i", controlnet_id: str | None = None):
         model_id = self.resolve_model_id(model_id)
-        if self.current_model_id == model_id and self.type == task and self.current_controlnet_id == controlnet_id and self.pipeline is not None:
+        # If we had LoRAs, we must reload to clear them (or unload if diffusers supports it well)
+        if self.current_model_id == model_id and self.type == task and self.current_controlnet_id == controlnet_id and self.pipeline is not None and not self.has_loras:
             return self.pipeline
 
         # Clear memory
         self.pipeline = None
+        self.has_loras = False
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -668,10 +681,51 @@ def load_image_any(image_src: str) -> Image.Image:
     return Image.open(image_path).convert("RGB")
 
 
+def apply_loras_and_embeddings(pipe, loras: list[dict], embeddings: list[dict]):
+    # Load specific LoRAs
+    if loras:
+        # Simple implementation: load first one for now, or use set_adapters if multiple
+        for lora in loras:
+            path = lora.get("path")
+            if path:
+                 # Check if path is absolute or relative to models/loras
+                 lora_path = Path(path)
+                 if not lora_path.is_absolute():
+                     lora_path = settings.models_dir / "loras" / path
+                 
+                 if lora_path.exists():
+                     try:
+                         pipe.load_lora_weights(str(lora_path))
+                         log("info", f"Loaded LoRA: {lora_path.name}")
+                     except Exception as e:
+                         log("warning", f"Failed to load LoRA {lora_path.name}: {e}")
+
+    # Load specific Embeddings if provided as paths
+    if embeddings and hasattr(pipe, "load_textual_inversion"):
+        for emb in embeddings:
+            path = emb.get("path")
+            if path:
+                emb_path = Path(path)
+                if not emb_path.is_absolute():
+                    emb_path = settings.models_dir / "embeddings" / path
+                
+                if emb_path.exists():
+                    try:
+                        pipe.load_textual_inversion(str(emb_path))
+                        log("info", f"Loaded specific embedding: {emb_path.name}")
+                    except Exception as e:
+                        log("warning", f"Failed to load specific embedding {emb_path.name}: {e}")
+
+
 @app.post("/api/v1/txt2img", response_model=InferenceResponse, dependencies=[Depends(require_agent_auth)])
 async def txt2img(request: Text2ImageRequest) -> InferenceResponse:
     start_time = time.time()
     pipe = pipeline_manager.load_pipeline(request.model_id, "t2i")
+    
+    # Apply LoRAs and Embeddings
+    if request.loras:
+        pipeline_manager.has_loras = True
+    apply_loras_and_embeddings(pipe, request.loras, request.embeddings)
     
     seed = request.seed if request.seed != -1 else torch.Generator().seed()
     generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(seed)
@@ -701,6 +755,12 @@ async def txt2img(request: Text2ImageRequest) -> InferenceResponse:
 async def img2img(request: Image2ImageRequest) -> InferenceResponse:
     start_time = time.time()
     pipe = pipeline_manager.load_pipeline(request.model_id, "i2i")
+    
+    # Apply LoRAs and Embeddings
+    if request.loras:
+        pipeline_manager.has_loras = True
+    apply_loras_and_embeddings(pipe, request.loras, request.embeddings)
+    
     init_image = load_image_any(request.image)
 
     seed = request.seed if request.seed != -1 else torch.Generator().seed()
@@ -731,6 +791,12 @@ async def img2img(request: Image2ImageRequest) -> InferenceResponse:
 async def controlnet_inference(request: ControlNetRequest) -> InferenceResponse:
     start_time = time.time()
     pipe = pipeline_manager.load_pipeline(request.model_id, "controlnet", request.controlnet_model_id)
+    
+    # Apply LoRAs and Embeddings
+    if request.loras:
+        pipeline_manager.has_loras = True
+    apply_loras_and_embeddings(pipe, request.loras, request.embeddings)
+    
     control_image = load_image_any(request.image)
 
     seed = request.seed if request.seed != -1 else torch.Generator().seed()
@@ -812,6 +878,11 @@ async def txt2vid(request: Text2VideoRequest) -> dict[str, Any]:
     start_time = time.time()
     pipe = pipeline_manager.load_pipeline(request.model_id, "t2v")
     
+    # Apply LoRAs and Embeddings
+    if request.loras:
+        pipeline_manager.has_loras = True
+    apply_loras_and_embeddings(pipe, request.loras, request.embeddings)
+    
     seed = request.seed if request.seed != -1 else torch.Generator().seed()
     generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(seed)
     
@@ -842,6 +913,11 @@ async def img2vid(request: Image2VideoRequest) -> dict[str, Any]:
     start_time = time.time()
     pipe = pipeline_manager.load_pipeline(request.model_id, "i2v")
     init_image = load_image_any(request.image)
+    
+    # Apply LoRAs and Embeddings
+    if request.loras:
+        pipeline_manager.has_loras = True
+    apply_loras_and_embeddings(pipe, request.loras, request.embeddings)
     
     seed = request.seed if request.seed != -1 else torch.Generator().seed()
     generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(seed)
