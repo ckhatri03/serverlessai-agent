@@ -24,5 +24,10 @@ AGENT_LOG_FILE="${SERVERLESSAI_AGENT_LOG_FILE:-$WORKSPACE_DIR/agent.log}"
 touch "$AGENT_LOG_FILE"
 
 echo "Starting Serverless AI Agent, logging to $AGENT_LOG_FILE"
-# Use tee to send logs to both stdout (for RunPod) and the log file
-python -u "$SCRIPT_DIR/main.py" 2>&1 | tee -a "$AGENT_LOG_FILE"
+# Use the venv's python if it exists, otherwise fall back to system python
+PYTHON_EXEC="$SCRIPT_DIR/venv/bin/python"
+if [ ! -f "$PYTHON_EXEC" ]; then
+  PYTHON_EXEC="python"
+fi
+
+"$PYTHON_EXEC" -u "$SCRIPT_DIR/main.py" 2>&1 | tee -a "$AGENT_LOG_FILE"

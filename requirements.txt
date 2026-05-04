@@ -1,17 +1,17 @@
 --extra-index-url https://download.pytorch.org/whl/cu124
-torch==2.4.1+cu124
-torchvision==0.19.1+cu124
-torchaudio==2.4.1+cu124
+torch==2.5.1+cu124
+torchvision==0.20.1+cu124
+torchaudio==2.5.1+cu124
 fastapi
 uvicorn
 requests
 pydantic
 python-multipart
-diffusers==0.33.0
-transformers==4.48.2
+diffusers==0.38.0
+transformers==5.7.0
 accelerate==1.1.1
 huggingface_hub
-xformers==0.0.28.post1
+xformers>=0.0.30
 sentencepiece
 opencv-python
 numpy<2.0.0
