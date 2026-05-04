@@ -110,7 +110,7 @@ def control_plane_v1_url() -> str:
     return f"{url}/api/v1"
 
 
-def report_workflow_event(user_id: str, workflow_id: str, event: str, success: bool, error: str = "", output: str = ""):
+def report_workflow_event(user_id: str, workflow_id: str, event: str, success: bool, error: str = "", output: str = "", agent_id: str | None = None):
     if not settings.control_plane_url:
         return
 
@@ -123,7 +123,7 @@ def report_workflow_event(user_id: str, workflow_id: str, event: str, success: b
         }
         payload = {
             "userId": user_id,
-            "agentId": settings.agent_id,
+            "agentId": agent_id or settings.agent_id,
             "workflowId": workflow_id,
             "event": event,
             "success": success,
@@ -336,6 +336,7 @@ class Text2ImageRequest(BaseModel):
     seed: int = -1
     sampler_name: str | None = None
     scheduler: str | None = None
+    batch_size: int = 1
     loras: list[dict] = Field(default_factory=list)
     embeddings: list[dict] = Field(default_factory=list)
     hf_token: str | None = None
@@ -353,6 +354,7 @@ class Image2ImageRequest(BaseModel):
     seed: int = -1
     sampler_name: str | None = None
     scheduler: str | None = None
+    batch_size: int = 1
     loras: list[dict] = Field(default_factory=list)
     embeddings: list[dict] = Field(default_factory=list)
     hf_token: str | None = None
@@ -362,6 +364,7 @@ class InferenceResponse(BaseModel):
     image_path: str
     seed: int
     duration: float
+    image_paths: list[str] = Field(default_factory=list)
 
 
 class GenerateJobRequest(BaseModel):
@@ -868,6 +871,7 @@ async def run_generate_job(job_id: str, endpoint: str, payload: dict[str, Any]) 
 
     started = time.time()
     user_id = payload.get("user_id", "unknown")
+    agent_id = payload.get("agent_id") or settings.agent_id
     log("info", f"Generation job {job_id} started endpoint={endpoint} user={user_id}")
     try:
         if endpoint == "/api/v1/txt2img":
@@ -892,11 +896,11 @@ async def run_generate_job(job_id: str, endpoint: str, payload: dict[str, Any]) 
             raise ValueError(f"Unsupported generation endpoint: {endpoint}")
 
         log("info", f"Generation job {job_id} complete output={output_path} duration={time.time() - started:.2f}s")
-        report_workflow_event(user_id, job_id, "generation-complete", True, output=output_path)
+        report_workflow_event(user_id, job_id, "generation-complete", True, output=output_path, agent_id=agent_id)
     except Exception as exc:
         err_msg = f"{exc}\n{traceback.format_exc()}"
         log("error", f"Generation job {job_id} failed: {err_msg}")
-        report_workflow_event(user_id, job_id, "generation-failed", False, error=str(exc))
+        report_workflow_event(user_id, job_id, "generation-failed", False, error=str(exc), agent_id=agent_id)
 
 
 @app.post("/api/v1/jobs/generate", response_model=GenerateJobResponse, dependencies=[Depends(require_agent_auth)])
@@ -966,9 +970,12 @@ def load_image_any(image_src: str) -> Image.Image:
     
     image_path = Path(image_src)
     if not image_path.is_absolute():
-        image_path = settings.workspace_dir / "input" / image_src
-        if not image_path.exists():
-            image_path = settings.workspace_dir / image_src
+        candidates = [
+            settings.workspace_dir / "input" / image_src,
+            settings.outputs_dir / image_src,
+            settings.workspace_dir / image_src,
+        ]
+        image_path = next((candidate for candidate in candidates if candidate.exists()), candidates[-1])
     
     if not image_path.exists():
          raise HTTPException(status_code=404, detail=f"Image not found: {image_src}")
@@ -1038,6 +1045,10 @@ def apply_loras_and_embeddings(pipe, loras: list[dict], embeddings: list[dict]):
                     raise HTTPException(status_code=400, detail=f"Failed to load embedding {emb_path.name}: {exc}") from exc
 
 
+def safe_batch_size(value: int) -> int:
+    return min(max(value, 1), 20)
+
+
 @app.post("/api/v1/txt2img", response_model=InferenceResponse, dependencies=[Depends(require_agent_auth)])
 async def txt2img(request: Text2ImageRequest) -> InferenceResponse:
     start_time = time.time()
@@ -1049,27 +1060,36 @@ async def txt2img(request: Text2ImageRequest) -> InferenceResponse:
     apply_loras_and_embeddings(pipe, request.loras, request.embeddings)
     apply_scheduler(pipe, request.sampler_name, request.scheduler)
     
-    seed = request.seed if request.seed != -1 else torch.Generator().seed()
-    generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(seed)
-    
-    output = pipe(
-        prompt=request.prompt,
-        negative_prompt=request.negative_prompt,
-        width=request.width,
-        height=request.height,
-        num_inference_steps=request.num_inference_steps,
-        guidance_scale=request.guidance_scale,
-        generator=generator,
-    ).images[0]
-    
-    filename = f"{uuid.uuid4()}.png"
-    save_path = settings.outputs_dir / filename
-    output.save(save_path)
+    batch_size = safe_batch_size(request.batch_size)
+    base_seed = request.seed if request.seed != -1 else torch.Generator().seed()
+    image_paths: list[str] = []
+    save_path: Path | None = None
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    for index in range(batch_size):
+        seed = base_seed + index
+        generator = torch.Generator(device=device).manual_seed(seed)
+        output = pipe(
+            prompt=request.prompt,
+            negative_prompt=request.negative_prompt,
+            width=request.width,
+            height=request.height,
+            num_inference_steps=request.num_inference_steps,
+            guidance_scale=request.guidance_scale,
+            generator=generator,
+        ).images[0]
+
+        filename = f"{uuid.uuid4()}.png"
+        save_path = settings.outputs_dir / filename
+        output.save(save_path)
+        image_paths.append(str(save_path))
+        log("info", f"Generated batch image {index + 1}/{batch_size} seed={seed} output={save_path}")
     
     return InferenceResponse(
         image_path=str(save_path),
-        seed=seed,
-        duration=time.time() - start_time
+        seed=base_seed,
+        duration=time.time() - start_time,
+        image_paths=image_paths,
     )
 
 
@@ -1086,27 +1106,36 @@ async def img2img(request: Image2ImageRequest) -> InferenceResponse:
     
     init_image = load_image_any(request.image)
 
-    seed = request.seed if request.seed != -1 else torch.Generator().seed()
-    generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(seed)
-    
-    output = pipe(
-        prompt=request.prompt,
-        negative_prompt=request.negative_prompt,
-        image=init_image,
-        strength=request.strength,
-        num_inference_steps=request.num_inference_steps,
-        guidance_scale=request.guidance_scale,
-        generator=generator,
-    ).images[0]
-    
-    filename = f"{uuid.uuid4()}.png"
-    save_path = settings.outputs_dir / filename
-    output.save(save_path)
+    batch_size = safe_batch_size(request.batch_size)
+    base_seed = request.seed if request.seed != -1 else torch.Generator().seed()
+    image_paths: list[str] = []
+    save_path: Path | None = None
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    for index in range(batch_size):
+        seed = base_seed + index
+        generator = torch.Generator(device=device).manual_seed(seed)
+        output = pipe(
+            prompt=request.prompt,
+            negative_prompt=request.negative_prompt,
+            image=init_image,
+            strength=request.strength,
+            num_inference_steps=request.num_inference_steps,
+            guidance_scale=request.guidance_scale,
+            generator=generator,
+        ).images[0]
+
+        filename = f"{uuid.uuid4()}.png"
+        save_path = settings.outputs_dir / filename
+        output.save(save_path)
+        image_paths.append(str(save_path))
+        log("info", f"Generated batch image {index + 1}/{batch_size} seed={seed} output={save_path}")
     
     return InferenceResponse(
         image_path=str(save_path),
-        seed=seed,
-        duration=time.time() - start_time
+        seed=base_seed,
+        duration=time.time() - start_time,
+        image_paths=image_paths,
     )
 
 
