@@ -95,7 +95,8 @@ def report_workflow_event(user_id: str, workflow_id: str, event: str, success: b
         return
 
     try:
-        url = f"{settings.control_plane_url.rstrip('/')}/api/v1/workflows/events"
+        # Use a dedicated public endpoint prefix to avoid Cognito Authorizer issues
+        url = f"{settings.control_plane_url.rstrip('/')}/api/agent/events"
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {settings.agent_token}"
@@ -681,10 +682,23 @@ class PipelineManager:
             log("info", f"Loading pipeline model={model_id} task={task}")
             if task == "t2i":
                 if is_single_file:
-                    loader = StableDiffusionXLPipeline if "xl" in model_id.lower() else StableDiffusionPipeline
-                    self.pipeline = loader.from_single_file(
-                        model_id, torch_dtype=dtype, token=effective_hf_token
-                    )
+                    # SDXL models often need specific classes and can be finicky with CLIP sub-models
+                    if "xl" in model_id.lower():
+                        from diffusers import StableDiffusionXLPipeline
+                        self.pipeline = StableDiffusionXLPipeline.from_single_file(
+                            model_id, 
+                            torch_dtype=dtype, 
+                            token=effective_hf_token,
+                            load_safety_checker=False
+                        )
+                    else:
+                        from diffusers import StableDiffusionPipeline
+                        self.pipeline = StableDiffusionPipeline.from_single_file(
+                            model_id, 
+                            torch_dtype=dtype, 
+                            token=effective_hf_token,
+                            load_safety_checker=False
+                        )
                 else:
                     self.pipeline = AutoPipelineForText2Image.from_pretrained(
                         model_id, 
@@ -694,10 +708,22 @@ class PipelineManager:
                     )
             elif task == "i2i":
                 if is_single_file:
-                    loader = StableDiffusionXLImg2ImgPipeline if "xl" in model_id.lower() else StableDiffusionImg2ImgPipeline
-                    self.pipeline = loader.from_single_file(
-                        model_id, torch_dtype=dtype, token=effective_hf_token
-                    )
+                    if "xl" in model_id.lower():
+                        from diffusers import StableDiffusionXLImg2ImgPipeline
+                        self.pipeline = StableDiffusionXLImg2ImgPipeline.from_single_file(
+                            model_id, 
+                            torch_dtype=dtype, 
+                            token=effective_hf_token,
+                            load_safety_checker=False
+                        )
+                    else:
+                        from diffusers import StableDiffusionImg2ImgPipeline
+                        self.pipeline = StableDiffusionImg2ImgPipeline.from_single_file(
+                            model_id, 
+                            torch_dtype=dtype, 
+                            token=effective_hf_token,
+                            load_safety_checker=False
+                        )
                 else:
                     self.pipeline = AutoPipelineForImage2Image.from_pretrained(
                         model_id, 

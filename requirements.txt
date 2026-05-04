@@ -19,3 +19,6 @@ controlnet_aux
 insightface
 onnxruntime-gpu
 spandrel
+omegaconf
+safetensors
+python-dotenv
