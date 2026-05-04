@@ -45,8 +45,10 @@ APP_VERSION = "0.1.1"
 
 
 class Settings(BaseModel):
+    agent_id: str = Field(default_factory=lambda: os.getenv("SERVERLESSAI_AGENT_ID", ""))
     agent_token: str = Field(default_factory=lambda: os.getenv("SERVERLESSAI_AGENT_TOKEN", ""))
     agent_token_file: Path = Field(default_factory=lambda: Path(os.getenv("SERVERLESSAI_AGENT_TOKEN_FILE", "/workspace/.serverlessai-agent-token")))
+    agent_id_file: Path = Field(default_factory=lambda: Path(os.getenv("SERVERLESSAI_AGENT_ID_FILE", "/workspace/.serverlessai-agent-id")))
     register_token: str = Field(default_factory=lambda: os.getenv("SERVERLESSAI_AGENT_REGISTER_TOKEN", ""))
     control_plane_url: str = Field(default_factory=lambda: os.getenv("SERVERLESSAI_CONTROL_PLANE_URL", ""))
     workspace_dir: Path = Field(default_factory=lambda: Path(os.getenv("WORKSPACE_DIR", "/workspace")))
@@ -99,16 +101,16 @@ def report_workflow_event(user_id: str, workflow_id: str, event: str, success: b
         url = f"{settings.control_plane_url.rstrip('/')}/api/agent/events"
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {settings.agent_token}"
+            "X-Agent-Token": settings.agent_token
         }
         payload = {
             "userId": user_id,
+            "agentId": settings.agent_id,
             "workflowId": workflow_id,
             "event": event,
             "success": success,
             "error": error,
-            "output": output,
-            "agentId": settings.pod_id
+            "output": output
         }
         resp = requests.post(url, json=payload, headers=headers, timeout=10)
         if resp.status_code != 200:
@@ -552,10 +554,26 @@ def persist_agent_token(token: str) -> None:
     settings.agent_token_file.chmod(0o600)
 
 
+def load_persisted_agent_id() -> str:
+    if settings.agent_id:
+        return settings.agent_id
+    if not settings.agent_id_file.exists():
+        return ""
+    return settings.agent_id_file.read_text().strip()
+
+
+def persist_agent_id(agent_id: str) -> None:
+    settings.agent_id_file.parent.mkdir(parents=True, exist_ok=True)
+    settings.agent_id_file.write_text(agent_id)
+    settings.agent_id_file.chmod(0o600)
+
+
 def register_with_control_plane() -> None:
     persisted_token = load_persisted_agent_token()
-    if persisted_token:
+    persisted_id = load_persisted_agent_id()
+    if persisted_token and persisted_id:
         settings.agent_token = persisted_token
+        settings.agent_id = persisted_id
         return
 
     if not settings.register_token or not settings.control_plane_url:
@@ -576,15 +594,19 @@ def register_with_control_plane() -> None:
     try:
         response = requests.post(register_url, json=payload, timeout=20)
         response.raise_for_status()
-        permanent_token = response.json().get("permanentToken", "")
+        data = response.json()
+        permanent_token = data.get("permanentToken", "")
+        agent_id = data.get("agentId", "")
     except requests.RequestException as exc:
         raise RuntimeError(f"Agent registration failed: {exc}") from exc
 
-    if not permanent_token:
-        raise RuntimeError("Agent registration did not return a permanent token")
+    if not permanent_token or not agent_id:
+        raise RuntimeError("Agent registration did not return a permanent token or agent ID")
 
     persist_agent_token(permanent_token)
+    persist_agent_id(agent_id)
     settings.agent_token = permanent_token
+    settings.agent_id = agent_id
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -731,13 +753,14 @@ class PipelineManager:
             if task == "t2i":
                 if is_single_file:
                     # SDXL models often need specific classes and can be finicky with CLIP sub-models
-                    if "xl" in model_id.lower():
+                    if "xl" in model_id.lower() or "illustrious" in model_id.lower() or "pony" in model_id.lower():
                         from diffusers import StableDiffusionXLPipeline
                         self.pipeline = StableDiffusionXLPipeline.from_single_file(
                             model_id, 
                             torch_dtype=dtype, 
                             token=effective_hf_token,
-                            load_safety_checker=False
+                            load_safety_checker=False,
+                            local_files_only=True
                         )
                     else:
                         from diffusers import StableDiffusionPipeline
@@ -745,7 +768,8 @@ class PipelineManager:
                             model_id, 
                             torch_dtype=dtype, 
                             token=effective_hf_token,
-                            load_safety_checker=False
+                            load_safety_checker=False,
+                            local_files_only=True
                         )
                 else:
                     self.pipeline = AutoPipelineForText2Image.from_pretrained(

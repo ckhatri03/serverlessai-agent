@@ -1,9 +1,16 @@
 #!/usr/bin/env sh
 set -eu
 
-export PORT="${PORT:-8000}"
 export WORKSPACE_DIR="${WORKSPACE_DIR:-/workspace}"
-export MODELS_DIR="${MODELS_DIR:-$WORKSPACE_DIR/models}"
+
+# Detect ComfyUI and favor its model directory for persistence
+if [ -d "/workspace/ComfyUI/models" ] && [ -z "${MODELS_DIR:-}" ]; then
+  export MODELS_DIR="/workspace/ComfyUI/models"
+else
+  export MODELS_DIR="${MODELS_DIR:-$WORKSPACE_DIR/models}"
+fi
+
+export PORT="${PORT:-8000}"
 export OUTPUTS_DIR="${OUTPUTS_DIR:-$WORKSPACE_DIR/output}"
 export WORKFLOWS_DIR="${WORKFLOWS_DIR:-$WORKSPACE_DIR/workflows}"
 

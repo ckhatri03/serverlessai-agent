@@ -3,9 +3,9 @@ uvicorn
 requests
 pydantic
 python-multipart
-diffusers>=0.33.0
-transformers
-accelerate
+diffusers==0.32.1
+transformers==4.46.3
+accelerate==1.1.1
 huggingface_hub
 xformers
 sentencepiece

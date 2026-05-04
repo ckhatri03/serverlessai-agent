@@ -96,7 +96,9 @@ chmod +x "$INSTALL_DIR/start-agent.sh"
 
 log "installing agent Python dependencies"
 "$PYTHON_BIN" -m pip install --upgrade pip
-"$PYTHON_BIN" -m pip install -r "$INSTALL_DIR/requirements.txt"
+# Create constraints to prevent pip from upgrading torch/torchvision/torchaudio if already present
+"$PYTHON_BIN" -m pip freeze | grep -E "torch|nvidia" > "$INSTALL_DIR/constraints.txt" || touch "$INSTALL_DIR/constraints.txt"
+"$PYTHON_BIN" -m pip install -r "$INSTALL_DIR/requirements.txt" -c "$INSTALL_DIR/constraints.txt"
 
 log "runtime ready; starting agent registration and API"
 exec "$INSTALL_DIR/start-agent.sh"
