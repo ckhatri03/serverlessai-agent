@@ -428,6 +428,19 @@ async def system_info() -> SystemInfoResponse:
     )
 
 
+import uvicorn
+import logging
+
+# Suppress verbose uvicorn access logs for health and status polling
+class EndpointFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.getMessage().find("/logs") == -1 and \
+               record.getMessage().find("/health") == -1 and \
+               record.getMessage().find("/status") == -1
+
+logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
+
+
 @app.post("/download-model", response_model=DownloadModelResponse, dependencies=[Depends(require_agent_auth)])
 async def download_model(request: DownloadModelRequest) -> DownloadModelResponse:
     target = ensure_child_path(settings.models_dir, request.destination)
@@ -443,7 +456,6 @@ async def download_model(request: DownloadModelRequest) -> DownloadModelResponse
                 repo_id=request.repo_id,
                 filename=request.filename,
                 local_dir=target.parent,
-                local_dir_use_symlinks=False,
                 token=settings.hf_token or None
             )
             downloaded_path = Path(path)
@@ -481,7 +493,22 @@ class PipelineManager:
         self.pipeline = None
         self.type = None # "t2i", "i2i", "controlnet"
 
+    def resolve_model_id(self, model_id: str) -> str:
+        mappings = {
+            "sdxl-base": "stabilityai/stable-diffusion-xl-base-1.0",
+            "sdxl": "stabilityai/stable-diffusion-xl-base-1.0",
+            "flux-schnell": "black-forest-labs/FLUX.1-schnell",
+            "flux-dev": "black-forest-labs/FLUX.1-dev",
+            "flux": "black-forest-labs/FLUX.1-schnell",
+            "wan-2.1-1.3b": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+            "wan-2.1-14b": "Wan-AI/Wan2.1-T2V-14B-Diffusers",
+            "wan": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+            "zit": "Alibaba-ALP/Z-Image-Turbo-Diffusers",
+        }
+        return mappings.get(model_id.lower(), model_id)
+
     def load_pipeline(self, model_id: str, task: str = "t2i", controlnet_id: str | None = None):
+        model_id = self.resolve_model_id(model_id)
         if self.current_model_id == model_id and self.type == task and self.current_controlnet_id == controlnet_id and self.pipeline is not None:
             return self.pipeline
 
@@ -492,21 +519,40 @@ class PipelineManager:
 
         dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
         
+        # Check if model_id is a local file
+        is_single_file = model_id.endswith((".safetensors", ".ckpt", ".pt"))
+        if not is_single_file and not os.path.sep in model_id and not "/" in model_id:
+             # Try to find it in models/checkpoints
+             local_path = settings.models_dir / "checkpoints" / model_id
+             if local_path.exists():
+                 model_id = str(local_path)
+                 is_single_file = model_id.endswith((".safetensors", ".ckpt", ".pt"))
+        
         try:
             if task == "t2i":
-                self.pipeline = AutoPipelineForText2Image.from_pretrained(
-                    model_id, 
-                    torch_dtype=dtype, 
-                    use_safetensors=True,
-                    token=settings.hf_token or None
-                )
+                if is_single_file:
+                    self.pipeline = AutoPipelineForText2Image.from_single_file(
+                        model_id, torch_dtype=dtype, token=settings.hf_token or None
+                    )
+                else:
+                    self.pipeline = AutoPipelineForText2Image.from_pretrained(
+                        model_id, 
+                        torch_dtype=dtype, 
+                        use_safetensors=True,
+                        token=settings.hf_token or None
+                    )
             elif task == "i2i":
-                self.pipeline = AutoPipelineForImage2Image.from_pretrained(
-                    model_id, 
-                    torch_dtype=dtype, 
-                    use_safetensors=True,
-                    token=settings.hf_token or None
-                )
+                if is_single_file:
+                    self.pipeline = AutoPipelineForImage2Image.from_single_file(
+                        model_id, torch_dtype=dtype, token=settings.hf_token or None
+                    )
+                else:
+                    self.pipeline = AutoPipelineForImage2Image.from_pretrained(
+                        model_id, 
+                        torch_dtype=dtype, 
+                        use_safetensors=True,
+                        token=settings.hf_token or None
+                    )
             elif task == "controlnet":
                 controlnet = ControlNetModel.from_pretrained(controlnet_id, torch_dtype=dtype)
                 from diffusers import StableDiffusionControlNetPipeline, StableDiffusionXLControlNetPipeline
