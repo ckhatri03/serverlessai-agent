@@ -150,6 +150,7 @@ class DownloadModelRequest(BaseModel):
     filename: str | None = None
     destination: str
     overwrite: bool = False
+    hf_token: str | None = None
 
 
 class DownloadModelResponse(BaseModel):
@@ -481,6 +482,8 @@ async def download_model(request: DownloadModelRequest) -> DownloadModelResponse
         return DownloadModelResponse(path=str(target), bytes=target.stat().st_size)
 
     target.parent.mkdir(parents=True, exist_ok=True)
+    
+    effective_hf_token = request.hf_token or settings.hf_token or None
 
     if request.repo_id:
         from huggingface_hub import hf_hub_download
@@ -489,7 +492,7 @@ async def download_model(request: DownloadModelRequest) -> DownloadModelResponse
                 repo_id=request.repo_id,
                 filename=request.filename,
                 local_dir=target.parent,
-                token=settings.hf_token or None
+                token=effective_hf_token
             )
             downloaded_path = Path(path)
             if downloaded_path.resolve() != target.resolve():
