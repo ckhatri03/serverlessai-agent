@@ -18,4 +18,4 @@ touch "$AGENT_LOG_FILE"
 
 echo "Starting Serverless AI Agent, logging to $AGENT_LOG_FILE"
 # Use tee to send logs to both stdout (for RunPod) and the log file
-python "$SCRIPT_DIR/main.py" 2>&1 | tee "$AGENT_LOG_FILE"
+python -u "$SCRIPT_DIR/main.py" 2>&1 | tee -a "$AGENT_LOG_FILE"

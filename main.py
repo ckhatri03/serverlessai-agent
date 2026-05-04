@@ -14,10 +14,25 @@ from typing import Any
 import requests
 import torch
 from PIL import Image
-from diffusers import AutoPipelineForText2Image, AutoPipelineForImage2Image, ControlNetModel, StableDiffusionControlNetPipeline
-from diffusers import WanPipeline, WanImageToVideoPipeline
+from diffusers import (
+    AutoPipelineForText2Image, 
+    AutoPipelineForImage2Image, 
+    ControlNetModel, 
+    StableDiffusionControlNetPipeline,
+    WanPipeline, 
+    WanImageToVideoPipeline,
+    # Schedulers
+    EulerDiscreteScheduler,
+    EulerAncestralDiscreteScheduler,
+    DPMSolverMultistepScheduler,
+    DPMSolverSDEScheduler,
+    LMSDiscreteScheduler,
+    PNDMScheduler,
+    DDIMScheduler,
+    FlowMatchEulerDiscreteScheduler
+)
 from diffusers.utils import export_to_video
-from fastapi import Depends, FastAPI, Header, HTTPException, status, UploadFile, File
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, status, UploadFile, File
 from pydantic import BaseModel, Field, HttpUrl
 
 
@@ -56,6 +71,79 @@ os.environ["HF_HOME"] = str(settings.hf_home)
 os.environ["TRANSFORMERS_CACHE"] = str(settings.hf_home / "transformers")
 os.environ["HF_HUB_CACHE"] = str(settings.hf_home / "hub")
 os.environ["XDG_CACHE_HOME"] = str(settings.workspace_dir / ".cache")
+
+
+def log(level: str, message: str) -> None:
+    timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    line = f"{timestamp} [{level.upper()}] {message}"
+    print(line, flush=True)
+    try:
+        settings.agent_log_file.parent.mkdir(parents=True, exist_ok=True)
+        with settings.agent_log_file.open("a", encoding="utf-8") as log_file:
+            log_file.write(line + "\n")
+    except Exception:
+        pass
+
+
+def report_workflow_event(user_id: str, workflow_id: str, event: str, success: bool, error: str = "", output: str = ""):
+    if not settings.control_plane_url:
+        return
+
+    try:
+        url = f"{settings.control_plane_url.rstrip('/')}/api/v1/workflows/events"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {settings.agent_token}"
+        }
+        payload = {
+            "userId": user_id,
+            "workflowId": workflow_id,
+            "event": event,
+            "success": success,
+            "error": error,
+            "output": output,
+            "agentId": settings.pod_id
+        }
+        resp = requests.post(url, json=payload, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            log("error", f"Failed to report workflow event: {resp.status_code} {resp.text}")
+    except Exception as exc:
+        log("error", f"Error reporting workflow event: {exc}")
+
+
+def apply_scheduler(pipe, sampler_name: str | None, scheduler_type: str | None):
+    if not sampler_name:
+        return
+
+    # Map generic names to diffusers scheduler classes
+    mapping = {
+        "euler": EulerDiscreteScheduler,
+        "euler_a": EulerAncestralDiscreteScheduler,
+        "dpmpp_2m": DPMSolverMultistepScheduler,
+        "dpmpp_2m_sde": DPMSolverMultistepScheduler,
+        "dpmpp_sde": DPMSolverSDEScheduler,
+        "lms": LMSDiscreteScheduler,
+        "pndm": PNDMScheduler,
+        "ddim": DDIMScheduler,
+    }
+
+    scheduler_class = mapping.get(sampler_name.lower())
+    if not scheduler_class:
+        log("warn", f"Unsupported sampler: {sampler_name}, skipping scheduler override")
+        return
+
+    # Handle scheduler types (karras, etc.)
+    kwargs = {}
+    if scheduler_type == "karras":
+        kwargs["use_karras_sigmas"] = True
+    elif scheduler_type == "exponential":
+        kwargs["use_exponential_sigmas"] = True
+
+    try:
+        pipe.scheduler = scheduler_class.from_config(pipe.scheduler.config, **kwargs)
+        log("info", f"Applied scheduler: {sampler_name} (type={scheduler_type or 'default'})")
+    except Exception as exc:
+        log("error", f"Failed to apply scheduler {sampler_name}: {exc}")
 
 
 async def ensure_git_repo() -> None:
@@ -211,6 +299,7 @@ class ShutdownRequest(BaseModel):
 
 
 class Text2ImageRequest(BaseModel):
+    user_id: str | None = None
     model_id: str
     prompt: str
     negative_prompt: str | None = None
@@ -219,6 +308,7 @@ class Text2ImageRequest(BaseModel):
     num_inference_steps: int = 30
     guidance_scale: float = 7.5
     seed: int = -1
+    sampler_name: str | None = None
     scheduler: str | None = None
     loras: list[dict] = []
     embeddings: list[dict] = []
@@ -226,6 +316,7 @@ class Text2ImageRequest(BaseModel):
 
 
 class Image2ImageRequest(BaseModel):
+    user_id: str | None = None
     model_id: str
     image: str  # File path relative to input root or URL
     prompt: str
@@ -234,6 +325,7 @@ class Image2ImageRequest(BaseModel):
     num_inference_steps: int = 30
     guidance_scale: float = 7.5
     seed: int = -1
+    sampler_name: str | None = None
     scheduler: str | None = None
     loras: list[dict] = []
     embeddings: list[dict] = []
@@ -244,6 +336,17 @@ class InferenceResponse(BaseModel):
     image_path: str
     seed: int
     duration: float
+
+
+class GenerateJobRequest(BaseModel):
+    job_id: str | None = None
+    endpoint: str
+    payload: dict[str, Any]
+
+
+class GenerateJobResponse(BaseModel):
+    job_id: str
+    status: str
 
 
 class ControlNetRequest(BaseModel):
@@ -570,6 +673,7 @@ class PipelineManager:
                  is_single_file = model_id.endswith((".safetensors", ".ckpt", ".pt"))
         
         try:
+            log("info", f"Loading pipeline model={model_id} task={task}")
             if task == "t2i":
                 if is_single_file:
                     self.pipeline = AutoPipelineForText2Image.from_single_file(
@@ -633,12 +737,58 @@ class PipelineManager:
             self.current_model_id = model_id
             self.current_controlnet_id = controlnet_id
             self.type = task
+            log("info", f"Pipeline ready model={model_id} task={task}")
             return self.pipeline
         except Exception as exc:
+            log("error", f"Failed to load pipeline model={model_id} task={task}: {exc}")
             raise HTTPException(status_code=500, detail=f"Failed to load pipeline: {exc}")
 
 
 pipeline_manager = PipelineManager()
+
+
+async def run_generate_job(job_id: str, endpoint: str, payload: dict[str, Any]) -> None:
+    import traceback
+
+    started = time.time()
+    user_id = payload.get("user_id", "unknown")
+    log("info", f"Generation job {job_id} started endpoint={endpoint} user={user_id}")
+    try:
+        if endpoint == "/api/v1/txt2img":
+            response = await txt2img(Text2ImageRequest(**payload))
+            output_path = response.image_path
+        elif endpoint == "/api/v1/img2img":
+            response = await img2img(Image2ImageRequest(**payload))
+            output_path = response.image_path
+        elif endpoint == "/api/v1/txt2vid":
+            response = await txt2vid(Text2VideoRequest(**payload))
+            output_path = response["video_path"]
+        elif endpoint == "/api/v1/img2vid":
+            response = await img2vid(Image2VideoRequest(**payload))
+            output_path = response["video_path"]
+        elif endpoint == "/api/v1/upscale":
+            response = await upscale_image(UpscaleRequest(**payload))
+            output_path = response.image_path
+        elif endpoint == "/api/v1/faceswap":
+            response = await faceswap(FaceSwapRequest(**payload))
+            output_path = response.image_path
+        else:
+            raise ValueError(f"Unsupported generation endpoint: {endpoint}")
+
+        log("info", f"Generation job {job_id} complete output={output_path} duration={time.time() - started:.2f}s")
+        report_workflow_event(user_id, job_id, "generation-complete", True, output=output_path)
+    except Exception as exc:
+        err_msg = f"{exc}\n{traceback.format_exc()}"
+        log("error", f"Generation job {job_id} failed: {err_msg}")
+        report_workflow_event(user_id, job_id, "generation-failed", False, error=str(exc))
+
+
+@app.post("/api/v1/jobs/generate", response_model=GenerateJobResponse, dependencies=[Depends(require_agent_auth)])
+async def start_generate_job(request: GenerateJobRequest, background_tasks: BackgroundTasks) -> GenerateJobResponse:
+    job_id = request.job_id or f"job-{uuid.uuid4()}"
+    background_tasks.add_task(run_generate_job, job_id, request.endpoint, request.payload)
+    log("info", f"Queued generation job {job_id} endpoint={request.endpoint}")
+    return GenerateJobResponse(job_id=job_id, status="queued")
 
 
 @app.post("/api/v1/upscale", response_model=UpscaleResponse, dependencies=[Depends(require_agent_auth)])
@@ -710,26 +860,51 @@ def load_image_any(image_src: str) -> Image.Image:
 
 
 def apply_loras_and_embeddings(pipe, loras: list[dict], embeddings: list[dict]):
-    # Load specific LoRAs
+    # Load selected LoRAs. Missing selected assets are hard failures; otherwise
+    # Studio appears to accept a LoRA while generation silently ignores it.
     if loras:
-        # Simple implementation: load first one for now, or use set_adapters if multiple
-        for lora in loras:
+        if not hasattr(pipe, "load_lora_weights"):
+            raise HTTPException(status_code=400, detail="Selected model pipeline does not support LoRA weights")
+
+        adapter_names: list[str] = []
+        adapter_weights: list[float] = []
+        named_adapters_supported = True
+        for index, lora in enumerate(loras):
             path = lora.get("path")
             if path:
-                 # Check if path is absolute or relative to models/loras
-                 lora_path = Path(path)
-                 if not lora_path.is_absolute():
-                     lora_path = settings.models_dir / "loras" / path
-                 
-                 if lora_path.exists():
-                     try:
-                         pipe.load_lora_weights(str(lora_path))
-                         log("info", f"Loaded LoRA: {lora_path.name}")
-                     except Exception as e:
-                         log("warning", f"Failed to load LoRA {lora_path.name}: {e}")
+                lora_path = Path(path)
+                if not lora_path.is_absolute():
+                    lora_path = settings.models_dir / "loras" / path
 
-    # Load specific Embeddings if provided as paths
-    if embeddings and hasattr(pipe, "load_textual_inversion"):
+                if not lora_path.exists():
+                    raise HTTPException(status_code=404, detail=f"LoRA not found: {path}")
+
+                adapter_name = f"lora_{index}"
+                try:
+                    pipe.load_lora_weights(str(lora_path), adapter_name=adapter_name)
+                except TypeError:
+                    if len(loras) > 1:
+                        raise HTTPException(status_code=400, detail="This pipeline cannot load multiple named LoRA adapters")
+                    named_adapters_supported = False
+                    pipe.load_lora_weights(str(lora_path))
+                except Exception as exc:
+                    raise HTTPException(status_code=400, detail=f"Failed to load LoRA {lora_path.name}: {exc}") from exc
+
+                if named_adapters_supported:
+                    adapter_names.append(adapter_name)
+                adapter_weights.append(float(lora.get("scale", 1.0)))
+                log("info", f"Loaded LoRA: {lora_path.name}")
+
+        if len(adapter_names) > 0 and hasattr(pipe, "set_adapters"):
+            try:
+                pipe.set_adapters(adapter_names, adapter_weights=adapter_weights)
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"Failed to activate LoRA adapters: {exc}") from exc
+
+    # Load selected textual inversion embeddings.
+    if embeddings:
+        if not hasattr(pipe, "load_textual_inversion"):
+            raise HTTPException(status_code=400, detail="Selected model pipeline does not support textual inversion embeddings")
         for emb in embeddings:
             path = emb.get("path")
             if path:
@@ -737,12 +912,14 @@ def apply_loras_and_embeddings(pipe, loras: list[dict], embeddings: list[dict]):
                 if not emb_path.is_absolute():
                     emb_path = settings.models_dir / "embeddings" / path
                 
-                if emb_path.exists():
-                    try:
-                        pipe.load_textual_inversion(str(emb_path))
-                        log("info", f"Loaded specific embedding: {emb_path.name}")
-                    except Exception as e:
-                        log("warning", f"Failed to load specific embedding {emb_path.name}: {e}")
+                if not emb_path.exists():
+                    raise HTTPException(status_code=404, detail=f"Embedding not found: {path}")
+
+                try:
+                    pipe.load_textual_inversion(str(emb_path))
+                    log("info", f"Loaded specific embedding: {emb_path.name}")
+                except Exception as exc:
+                    raise HTTPException(status_code=400, detail=f"Failed to load embedding {emb_path.name}: {exc}") from exc
 
 
 @app.post("/api/v1/txt2img", response_model=InferenceResponse, dependencies=[Depends(require_agent_auth)])
