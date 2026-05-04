@@ -8,6 +8,7 @@ import subprocess
 import time
 import uuid
 from contextlib import asynccontextmanager
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -92,13 +93,30 @@ def log(level: str, message: str) -> None:
         pass
 
 
+def control_plane_root_url() -> str:
+    url = settings.control_plane_url.rstrip("/")
+    for suffix in ("/api/v1", "/api"):
+        if url.endswith(suffix):
+            return url[: -len(suffix)]
+    return url
+
+
+def control_plane_v1_url() -> str:
+    url = settings.control_plane_url.rstrip("/")
+    if url.endswith("/api/v1"):
+        return url
+    if url.endswith("/api"):
+        return f"{url}/v1"
+    return f"{url}/api/v1"
+
+
 def report_workflow_event(user_id: str, workflow_id: str, event: str, success: bool, error: str = "", output: str = ""):
     if not settings.control_plane_url:
         return
 
     try:
         # Use a dedicated public endpoint prefix to avoid Cognito Authorizer issues
-        url = f"{settings.control_plane_url.rstrip('/')}/api/agent/events"
+        url = f"{control_plane_root_url()}/api/agent/events"
         headers = {
             "Content-Type": "application/json",
             "X-Agent-Token": settings.agent_token
@@ -579,7 +597,7 @@ def register_with_control_plane() -> None:
     if not settings.register_token or not settings.control_plane_url:
         return
 
-    register_url = f"{settings.control_plane_url.rstrip('/')}/agents/register"
+    register_url = f"{control_plane_v1_url()}/agents/register"
     payload = {
         "registerToken": settings.register_token,
         "podId": settings.pod_id,
@@ -1314,11 +1332,23 @@ async def list_outputs(page: int = 1, pageSize: int = 10) -> OutputsResponse:
 
 
 @app.get("/outputs/file", dependencies=[Depends(require_agent_auth)])
-async def output_file(path: str) -> Any:
-    from fastapi.responses import FileResponse
+async def output_file(path: str, max_side: int | None = None, quality: int = 85) -> Any:
+    from fastapi.responses import FileResponse, Response
 
     output_path = ensure_output_file(path)
     media_type = mimetypes.guess_type(output_path.name)[0] or "application/octet-stream"
+    if max_side and max_side > 0 and media_type.startswith("image/"):
+        with Image.open(output_path) as image:
+            preview = image.convert("RGB")
+            preview.thumbnail((max_side, max_side))
+            buffer = BytesIO()
+            safe_quality = min(max(quality, 40), 95)
+            preview.save(buffer, format="JPEG", quality=safe_quality, optimize=True)
+            return Response(
+                content=buffer.getvalue(),
+                media_type="image/jpeg",
+                headers={"Content-Disposition": f'inline; filename="{output_path.stem}_preview.jpg"'},
+            )
     return FileResponse(output_path, media_type=media_type, filename=output_path.name)
 
 
