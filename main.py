@@ -29,7 +29,12 @@ from diffusers import (
     LMSDiscreteScheduler,
     PNDMScheduler,
     DDIMScheduler,
-    FlowMatchEulerDiscreteScheduler
+    FlowMatchEulerDiscreteScheduler,
+    # Specific Pipelines for single file loading
+    StableDiffusionPipeline,
+    StableDiffusionXLPipeline,
+    StableDiffusionImg2ImgPipeline,
+    StableDiffusionXLImg2ImgPipeline
 )
 from diffusers.utils import export_to_video
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, status, UploadFile, File
@@ -676,7 +681,8 @@ class PipelineManager:
             log("info", f"Loading pipeline model={model_id} task={task}")
             if task == "t2i":
                 if is_single_file:
-                    self.pipeline = AutoPipelineForText2Image.from_single_file(
+                    loader = StableDiffusionXLPipeline if "xl" in model_id.lower() else StableDiffusionPipeline
+                    self.pipeline = loader.from_single_file(
                         model_id, torch_dtype=dtype, token=effective_hf_token
                     )
                 else:
@@ -688,7 +694,8 @@ class PipelineManager:
                     )
             elif task == "i2i":
                 if is_single_file:
-                    self.pipeline = AutoPipelineForImage2Image.from_single_file(
+                    loader = StableDiffusionXLImg2ImgPipeline if "xl" in model_id.lower() else StableDiffusionImg2ImgPipeline
+                    self.pipeline = loader.from_single_file(
                         model_id, torch_dtype=dtype, token=effective_hf_token
                     )
                 else:
