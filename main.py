@@ -51,6 +51,12 @@ class Settings(BaseModel):
 
 settings = Settings()
 
+# Force HF and Transformers cache to /workspace to avoid filling container disk
+os.environ["HF_HOME"] = str(settings.hf_home)
+os.environ["TRANSFORMERS_CACHE"] = str(settings.hf_home / "transformers")
+os.environ["HF_HUB_CACHE"] = str(settings.hf_home / "hub")
+os.environ["XDG_CACHE_HOME"] = str(settings.workspace_dir / ".cache")
+
 
 async def ensure_git_repo() -> None:
     try:
@@ -101,6 +107,18 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Serverless AI Agent", version=APP_VERSION, lifespan=lifespan)
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    import traceback
+    error_msg = f"Unhandled error: {str(exc)}\n{traceback.format_exc()}"
+    log("error", error_msg)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": str(exc), "traceback": traceback.format_exc()},
+    )
+
+from fastapi.responses import JSONResponse
 
 
 class HealthResponse(BaseModel):
@@ -203,6 +221,7 @@ class Text2ImageRequest(BaseModel):
     scheduler: str | None = None
     loras: list[dict] = []
     embeddings: list[dict] = []
+    hf_token: str | None = None
 
 
 class Image2ImageRequest(BaseModel):
@@ -217,6 +236,7 @@ class Image2ImageRequest(BaseModel):
     scheduler: str | None = None
     loras: list[dict] = []
     embeddings: list[dict] = []
+    hf_token: str | None = None
 
 
 class InferenceResponse(BaseModel):
@@ -239,6 +259,7 @@ class ControlNetRequest(BaseModel):
     seed: int = -1
     loras: list[dict] = []
     embeddings: list[dict] = []
+    hf_token: str | None = None
 
 
 class FaceSwapRequest(BaseModel):
@@ -267,6 +288,7 @@ class Text2VideoRequest(BaseModel):
     fps: int = 16
     loras: list[dict] = []
     embeddings: list[dict] = []
+    hf_token: str | None = None
 
 
 class Image2VideoRequest(BaseModel):
@@ -283,6 +305,7 @@ class Image2VideoRequest(BaseModel):
     fps: int = 16
     loras: list[dict] = []
     embeddings: list[dict] = []
+    hf_token: str | None = None
 
 
 class UpscaleRequest(BaseModel):
@@ -518,7 +541,7 @@ class PipelineManager:
         }
         return mappings.get(model_id.lower(), model_id)
 
-    def load_pipeline(self, model_id: str, task: str = "t2i", controlnet_id: str | None = None):
+    def load_pipeline(self, model_id: str, task: str = "t2i", controlnet_id: str | None = None, hf_token: str | None = None):
         model_id = self.resolve_model_id(model_id)
         # If we had LoRAs, we must reload to clear them (or unload if diffusers supports it well)
         if self.current_model_id == model_id and self.type == task and self.current_controlnet_id == controlnet_id and self.pipeline is not None and not self.has_loras:
@@ -531,6 +554,8 @@ class PipelineManager:
             torch.cuda.empty_cache()
 
         dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+        
+        effective_hf_token = hf_token or settings.hf_token or None
         
         # Check if model_id is a local file
         is_single_file = model_id.endswith((".safetensors", ".ckpt", ".pt"))
@@ -545,47 +570,47 @@ class PipelineManager:
             if task == "t2i":
                 if is_single_file:
                     self.pipeline = AutoPipelineForText2Image.from_single_file(
-                        model_id, torch_dtype=dtype, token=settings.hf_token or None
+                        model_id, torch_dtype=dtype, token=effective_hf_token
                     )
                 else:
                     self.pipeline = AutoPipelineForText2Image.from_pretrained(
                         model_id, 
                         torch_dtype=dtype, 
                         use_safetensors=True,
-                        token=settings.hf_token or None
+                        token=effective_hf_token
                     )
             elif task == "i2i":
                 if is_single_file:
                     self.pipeline = AutoPipelineForImage2Image.from_single_file(
-                        model_id, torch_dtype=dtype, token=settings.hf_token or None
+                        model_id, torch_dtype=dtype, token=effective_hf_token
                     )
                 else:
                     self.pipeline = AutoPipelineForImage2Image.from_pretrained(
                         model_id, 
                         torch_dtype=dtype, 
                         use_safetensors=True,
-                        token=settings.hf_token or None
+                        token=effective_hf_token
                     )
             elif task == "controlnet":
-                controlnet = ControlNetModel.from_pretrained(controlnet_id, torch_dtype=dtype)
+                controlnet = ControlNetModel.from_pretrained(controlnet_id, torch_dtype=dtype, token=effective_hf_token)
                 from diffusers import StableDiffusionControlNetPipeline, StableDiffusionXLControlNetPipeline
                 if "xl" in model_id.lower():
                     self.pipeline = StableDiffusionXLControlNetPipeline.from_pretrained(
-                        model_id, controlnet=controlnet, torch_dtype=dtype, use_safetensors=True, token=settings.hf_token or None
+                        model_id, controlnet=controlnet, torch_dtype=dtype, use_safetensors=True, token=effective_hf_token
                     )
                 else:
                     self.pipeline = StableDiffusionControlNetPipeline.from_pretrained(
-                        model_id, controlnet=controlnet, torch_dtype=dtype, use_safetensors=True, token=settings.hf_token or None
+                        model_id, controlnet=controlnet, torch_dtype=dtype, use_safetensors=True, token=effective_hf_token
                     )
             elif task == "t2v":
                 # Primarily Wan 2.1 support
                 self.pipeline = WanPipeline.from_pretrained(
-                    model_id, torch_dtype=dtype, use_safetensors=True, token=settings.hf_token or None
+                    model_id, torch_dtype=dtype, use_safetensors=True, token=effective_hf_token
                 )
             elif task == "i2v":
                 # Primarily Wan 2.1 support
                 self.pipeline = WanImageToVideoPipeline.from_pretrained(
-                    model_id, torch_dtype=dtype, use_safetensors=True, token=settings.hf_token or None
+                    model_id, torch_dtype=dtype, use_safetensors=True, token=effective_hf_token
                 )
             
             # Auto-load embeddings from /workspace/models/embeddings
@@ -720,7 +745,7 @@ def apply_loras_and_embeddings(pipe, loras: list[dict], embeddings: list[dict]):
 @app.post("/api/v1/txt2img", response_model=InferenceResponse, dependencies=[Depends(require_agent_auth)])
 async def txt2img(request: Text2ImageRequest) -> InferenceResponse:
     start_time = time.time()
-    pipe = pipeline_manager.load_pipeline(request.model_id, "t2i")
+    pipe = pipeline_manager.load_pipeline(request.model_id, "t2i", hf_token=request.hf_token)
     
     # Apply LoRAs and Embeddings
     if request.loras:
@@ -754,7 +779,7 @@ async def txt2img(request: Text2ImageRequest) -> InferenceResponse:
 @app.post("/api/v1/img2img", response_model=InferenceResponse, dependencies=[Depends(require_agent_auth)])
 async def img2img(request: Image2ImageRequest) -> InferenceResponse:
     start_time = time.time()
-    pipe = pipeline_manager.load_pipeline(request.model_id, "i2i")
+    pipe = pipeline_manager.load_pipeline(request.model_id, "i2i", hf_token=request.hf_token)
     
     # Apply LoRAs and Embeddings
     if request.loras:
@@ -790,7 +815,7 @@ async def img2img(request: Image2ImageRequest) -> InferenceResponse:
 @app.post("/api/v1/controlnet", response_model=InferenceResponse, dependencies=[Depends(require_agent_auth)])
 async def controlnet_inference(request: ControlNetRequest) -> InferenceResponse:
     start_time = time.time()
-    pipe = pipeline_manager.load_pipeline(request.model_id, "controlnet", request.controlnet_model_id)
+    pipe = pipeline_manager.load_pipeline(request.model_id, "controlnet", request.controlnet_model_id, hf_token=request.hf_token)
     
     # Apply LoRAs and Embeddings
     if request.loras:
@@ -876,7 +901,7 @@ async def faceswap(request: FaceSwapRequest) -> InferenceResponse:
 @app.post("/api/v1/txt2vid", response_model=dict[str, Any], dependencies=[Depends(require_agent_auth)])
 async def txt2vid(request: Text2VideoRequest) -> dict[str, Any]:
     start_time = time.time()
-    pipe = pipeline_manager.load_pipeline(request.model_id, "t2v")
+    pipe = pipeline_manager.load_pipeline(request.model_id, "t2v", hf_token=request.hf_token)
     
     # Apply LoRAs and Embeddings
     if request.loras:
@@ -911,7 +936,7 @@ async def txt2vid(request: Text2VideoRequest) -> dict[str, Any]:
 @app.post("/api/v1/img2vid", response_model=dict[str, Any], dependencies=[Depends(require_agent_auth)])
 async def img2vid(request: Image2VideoRequest) -> dict[str, Any]:
     start_time = time.time()
-    pipe = pipeline_manager.load_pipeline(request.model_id, "i2v")
+    pipe = pipeline_manager.load_pipeline(request.model_id, "i2v", hf_token=request.hf_token)
     init_image = load_image_any(request.image)
     
     # Apply LoRAs and Embeddings
