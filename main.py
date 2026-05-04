@@ -318,8 +318,8 @@ class Text2ImageRequest(BaseModel):
     seed: int = -1
     sampler_name: str | None = None
     scheduler: str | None = None
-    loras: list[dict] = []
-    embeddings: list[dict] = []
+    loras: list[dict] = Field(default_factory=list)
+    embeddings: list[dict] = Field(default_factory=list)
     hf_token: str | None = None
 
 
@@ -335,8 +335,8 @@ class Image2ImageRequest(BaseModel):
     seed: int = -1
     sampler_name: str | None = None
     scheduler: str | None = None
-    loras: list[dict] = []
-    embeddings: list[dict] = []
+    loras: list[dict] = Field(default_factory=list)
+    embeddings: list[dict] = Field(default_factory=list)
     hf_token: str | None = None
 
 
@@ -369,8 +369,8 @@ class ControlNetRequest(BaseModel):
     num_inference_steps: int = 30
     guidance_scale: float = 7.5
     seed: int = -1
-    loras: list[dict] = []
-    embeddings: list[dict] = []
+    loras: list[dict] = Field(default_factory=list)
+    embeddings: list[dict] = Field(default_factory=list)
     hf_token: str | None = None
 
 
@@ -398,8 +398,8 @@ class Text2VideoRequest(BaseModel):
     guidance_scale: float = 6.0
     seed: int = -1
     fps: int = 16
-    loras: list[dict] = []
-    embeddings: list[dict] = []
+    loras: list[dict] = Field(default_factory=list)
+    embeddings: list[dict] = Field(default_factory=list)
     hf_token: str | None = None
 
 
@@ -415,8 +415,8 @@ class Image2VideoRequest(BaseModel):
     guidance_scale: float = 5.0
     seed: int = -1
     fps: int = 16
-    loras: list[dict] = []
-    embeddings: list[dict] = []
+    loras: list[dict] = Field(default_factory=list)
+    embeddings: list[dict] = Field(default_factory=list)
     hf_token: str | None = None
 
 
@@ -759,7 +759,6 @@ class PipelineManager:
                             model_id, 
                             torch_dtype=dtype, 
                             token=effective_hf_token,
-                            load_safety_checker=False,
                             local_files_only=True
                         )
                     else:
@@ -768,7 +767,6 @@ class PipelineManager:
                             model_id, 
                             torch_dtype=dtype, 
                             token=effective_hf_token,
-                            load_safety_checker=False,
                             local_files_only=True
                         )
                 else:
@@ -786,7 +784,7 @@ class PipelineManager:
                             model_id, 
                             torch_dtype=dtype, 
                             token=effective_hf_token,
-                            load_safety_checker=False
+                            local_files_only=True
                         )
                     else:
                         from diffusers import StableDiffusionImg2ImgPipeline
@@ -794,7 +792,7 @@ class PipelineManager:
                             model_id, 
                             torch_dtype=dtype, 
                             token=effective_hf_token,
-                            load_safety_checker=False
+                            local_files_only=True
                         )
                 else:
                     self.pipeline = AutoPipelineForImage2Image.from_pretrained(
@@ -815,6 +813,10 @@ class PipelineManager:
                         model_id, controlnet=controlnet, torch_dtype=dtype, use_safetensors=True, token=effective_hf_token
                     )
             elif task == "t2v":
+                if is_single_file:
+                    raise HTTPException(status_code=400, detail="Text2Video requires a Diffusers model directory or Hugging Face repo, not a single checkpoint file")
+                if "wan" not in model_id.lower():
+                    raise HTTPException(status_code=400, detail="Text2Video currently supports Wan Diffusers models only")
                 # Primarily Wan 2.1 support
                 self.pipeline = WanPipeline.from_pretrained(
                     model_id, torch_dtype=dtype, use_safetensors=True, token=effective_hf_token
@@ -825,17 +827,6 @@ class PipelineManager:
                     model_id, torch_dtype=dtype, use_safetensors=True, token=effective_hf_token
                 )
             
-            # Auto-load embeddings from /workspace/models/embeddings
-            embeddings_dir = settings.models_dir / "embeddings"
-            if embeddings_dir.exists() and hasattr(self.pipeline, "load_textual_inversion"):
-                for emb_file in embeddings_dir.rglob("*"):
-                    if emb_file.is_file() and emb_file.suffix in {".pt", ".bin", ".safetensors"}:
-                        try:
-                            self.pipeline.load_textual_inversion(str(emb_file))
-                            log("info", f"Loaded embedding: {emb_file.name}")
-                        except Exception as e:
-                            log("warning", f"Failed to load embedding {emb_file.name}: {e}")
-
             if torch.cuda.is_available():
                 self.pipeline.enable_model_cpu_offload()
             
@@ -844,6 +835,8 @@ class PipelineManager:
             self.type = task
             log("info", f"Pipeline ready model={model_id} task={task}")
             return self.pipeline
+        except HTTPException:
+            raise
         except Exception as exc:
             log("error", f"Failed to load pipeline model={model_id} task={task}: {exc}")
             raise HTTPException(status_code=500, detail=f"Failed to load pipeline: {exc}")
@@ -1033,9 +1026,10 @@ async def txt2img(request: Text2ImageRequest) -> InferenceResponse:
     pipe = pipeline_manager.load_pipeline(request.model_id, "t2i", hf_token=request.hf_token)
     
     # Apply LoRAs and Embeddings
-    if request.loras:
+    if request.loras or request.embeddings:
         pipeline_manager.has_loras = True
     apply_loras_and_embeddings(pipe, request.loras, request.embeddings)
+    apply_scheduler(pipe, request.sampler_name, request.scheduler)
     
     seed = request.seed if request.seed != -1 else torch.Generator().seed()
     generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(seed)
@@ -1067,9 +1061,10 @@ async def img2img(request: Image2ImageRequest) -> InferenceResponse:
     pipe = pipeline_manager.load_pipeline(request.model_id, "i2i", hf_token=request.hf_token)
     
     # Apply LoRAs and Embeddings
-    if request.loras:
+    if request.loras or request.embeddings:
         pipeline_manager.has_loras = True
     apply_loras_and_embeddings(pipe, request.loras, request.embeddings)
+    apply_scheduler(pipe, request.sampler_name, request.scheduler)
     
     init_image = load_image_any(request.image)
 
@@ -1103,7 +1098,7 @@ async def controlnet_inference(request: ControlNetRequest) -> InferenceResponse:
     pipe = pipeline_manager.load_pipeline(request.model_id, "controlnet", request.controlnet_model_id, hf_token=request.hf_token)
     
     # Apply LoRAs and Embeddings
-    if request.loras:
+    if request.loras or request.embeddings:
         pipeline_manager.has_loras = True
     apply_loras_and_embeddings(pipe, request.loras, request.embeddings)
     
@@ -1189,7 +1184,7 @@ async def txt2vid(request: Text2VideoRequest) -> dict[str, Any]:
     pipe = pipeline_manager.load_pipeline(request.model_id, "t2v", hf_token=request.hf_token)
     
     # Apply LoRAs and Embeddings
-    if request.loras:
+    if request.loras or request.embeddings:
         pipeline_manager.has_loras = True
     apply_loras_and_embeddings(pipe, request.loras, request.embeddings)
     
@@ -1225,7 +1220,7 @@ async def img2vid(request: Image2VideoRequest) -> dict[str, Any]:
     init_image = load_image_any(request.image)
     
     # Apply LoRAs and Embeddings
-    if request.loras:
+    if request.loras or request.embeddings:
         pipeline_manager.has_loras = True
     apply_loras_and_embeddings(pipe, request.loras, request.embeddings)
     
