@@ -344,54 +344,6 @@ class InferenceResponse(BaseModel):
     duration: float
 
 
-class SystemCheckResponse(BaseModel):
-    status: str
-    families: dict[str, bool]
-    workflows: dict[str, bool]
-    storage: dict[str, Any]
-
-
-@app.get("/api/v1/system/check", response_model=SystemCheckResponse, dependencies=[Depends(require_agent_auth)])
-async def system_check():
-    # Check for model families
-    families = {
-        "sdxl": (settings.models_dir / "checkpoints/sd_xl_base_1.0.safetensors").exists(),
-        "flux": (settings.models_dir / "checkpoints/flux1-schnell.safetensors").exists() or (settings.models_dir / "checkpoints/flux1-dev.safetensors").exists(),
-        "qwen": any((settings.models_dir / "checkpoints").glob("qwen*")),
-        "wan": any((settings.models_dir / "checkpoints").glob("wan*")),
-        "zit": any((settings.models_dir / "checkpoints").glob("zit*")),
-        "illustrious": any((settings.models_dir / "checkpoints").glob("*illustrious*")),
-        "pony": any((settings.models_dir / "checkpoints").glob("*pony*")),
-    }
-    
-    # Check for workflows
-    workflows = {
-        "txt2image": families["sdxl"] or families["flux"] or families["zit"] or families["illustrious"] or families["pony"],
-        "img2image": families["sdxl"] or families["flux"] or families["zit"] or families["illustrious"] or families["pony"],
-        "txt2vid": families["wan"] or families["qwen"],
-        "img2vid": families["wan"] or families["qwen"],
-        "faceswap": (settings.models_dir / "insightface/inswapper_128.onnx").exists(),
-        "controlnet": any((settings.models_dir / "controlnet").glob("*")),
-        "openpose": (settings.models_dir / "controlnet/control_v11p_sd15_openpose.pth").exists() or any((settings.models_dir / "controlnet").glob("*openpose*")),
-    }
-    
-    # Storage info
-    import shutil
-    total, used, free = shutil.disk_usage(settings.workspace_dir)
-    
-    return SystemCheckResponse(
-        status="ok",
-        families=families,
-        workflows=workflows,
-        storage={
-            "total": total,
-            "used": used,
-            "free": free,
-            "percent": round((used / total) * 100, 2)
-        }
-    )
-
-
 class GenerateJobRequest(BaseModel):
     job_id: str | None = None
     endpoint: str
@@ -484,6 +436,54 @@ def require_agent_auth(authorization: str | None = Header(default=None)) -> None
     expected = f"Bearer {settings.agent_token}"
     if authorization != expected:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid agent token")
+
+
+class SystemCheckResponse(BaseModel):
+    status: str
+    families: dict[str, bool]
+    workflows: dict[str, bool]
+    storage: dict[str, Any]
+
+
+@app.get("/api/v1/system/check", response_model=SystemCheckResponse, dependencies=[Depends(require_agent_auth)])
+async def system_check():
+    # Check for model families
+    families = {
+        "sdxl": (settings.models_dir / "checkpoints/sd_xl_base_1.0.safetensors").exists(),
+        "flux": (settings.models_dir / "checkpoints/flux1-schnell.safetensors").exists() or (settings.models_dir / "checkpoints/flux1-dev.safetensors").exists(),
+        "qwen": any((settings.models_dir / "checkpoints").glob("qwen*")),
+        "wan": any((settings.models_dir / "checkpoints").glob("wan*")),
+        "zit": any((settings.models_dir / "checkpoints").glob("zit*")),
+        "illustrious": any((settings.models_dir / "checkpoints").glob("*illustrious*")),
+        "pony": any((settings.models_dir / "checkpoints").glob("*pony*")),
+    }
+
+    # Check for workflows
+    workflows = {
+        "txt2image": families["sdxl"] or families["flux"] or families["zit"] or families["illustrious"] or families["pony"],
+        "img2image": families["sdxl"] or families["flux"] or families["zit"] or families["illustrious"] or families["pony"],
+        "txt2vid": families["wan"] or families["qwen"],
+        "img2vid": families["wan"] or families["qwen"],
+        "faceswap": (settings.models_dir / "insightface/inswapper_128.onnx").exists(),
+        "controlnet": any((settings.models_dir / "controlnet").glob("*")),
+        "openpose": (settings.models_dir / "controlnet/control_v11p_sd15_openpose.pth").exists() or any((settings.models_dir / "controlnet").glob("*openpose*")),
+    }
+
+    # Storage info
+    import shutil
+    total, used, free = shutil.disk_usage(settings.workspace_dir)
+
+    return SystemCheckResponse(
+        status="ok",
+        families=families,
+        workflows=workflows,
+        storage={
+            "total": total,
+            "used": used,
+            "free": free,
+            "percent": round((used / total) * 100, 2)
+        }
+    )
 
 
 def ensure_child_path(root: Path, relative_path: str) -> Path:
