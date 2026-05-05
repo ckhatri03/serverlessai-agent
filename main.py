@@ -1158,44 +1158,58 @@ def apply_loras_and_embeddings(pipe, loras: list[dict], embeddings: list[dict]) 
                     raise HTTPException(status_code=404, detail=f"Embedding not found: {path}")
 
                 token = emb_path.stem
-                try:
                     # Try default loading first
+                    try:
+                        pipe.load_textual_inversion(str(emb_path), token=token)
+                        log("info", f"Loaded embedding: {emb_path.name} with token: {token}")
+                        if is_neg:
+                            neg_tokens.append(token)
+                        else:
+                            pos_tokens.append(token)
+                        continue
+                    except Exception:
+                        pass
+
+                    # Fallback for SDXL multi-encoder embeddings (e.g. Kohya style with clip_l/clip_g)
+                    if emb_path.suffix == ".safetensors" and hasattr(pipe, "text_encoder_2"):
+                        state_dict = load_file(str(emb_path))
+                        # If it has clip_l and clip_g, we can load them individually
+                        if "clip_l" in state_dict and "clip_g" in state_dict:
+                            pipe.load_textual_inversion(
+                                state_dict["clip_l"], 
+                                token=token, 
+                                text_encoder=pipe.text_encoder, 
+                                tokenizer=pipe.tokenizer
+                            )
+                            pipe.load_textual_inversion(
+                                state_dict["clip_g"], 
+                                token=token, 
+                                text_encoder=pipe.text_encoder_2, 
+                                tokenizer=pipe.tokenizer_2
+                            )
+                            log("info", f"Loaded SDXL multi-encoder embedding (manual): {emb_path.name} with token: {token}")
+                            if is_neg:
+                                neg_tokens.append(token)
+                            else:
+                                pos_tokens.append(token)
+                            continue
+                        else:
+                            # Try loading the whole state dict on the pipeline
+                            pipe.load_textual_inversion(state_dict, token=token)
+                            log("info", f"Loaded SDXL state_dict embedding: {emb_path.name} with token: {token}")
+                            if is_neg:
+                                neg_tokens.append(token)
+                            else:
+                                pos_tokens.append(token)
+                            continue
+                    
+                    # If we got here, it's a non-SDXL model or a different format, and the first attempt failed
                     pipe.load_textual_inversion(str(emb_path))
-                    log("info", f"Loaded specific embedding: {emb_path.name}")
+                    log("info", f"Loaded embedding (fallback): {emb_path.name}")
                     if is_neg:
                         neg_tokens.append(token)
                     else:
                         pos_tokens.append(token)
-                except Exception as exc:
-                    # Fallback for SDXL multi-encoder embeddings (e.g. Kohya style with clip_l/clip_g)
-                    try:
-                        if emb_path.suffix == ".safetensors" and hasattr(pipe, "text_encoder_2"):
-                            state_dict = load_file(str(emb_path))
-                            if "clip_l" in state_dict and "clip_g" in state_dict:
-                                pipe.load_textual_inversion(
-                                    state_dict["clip_l"], 
-                                    token=token, 
-                                    text_encoder=pipe.text_encoder, 
-                                    tokenizer=pipe.tokenizer
-                                )
-                                pipe.load_textual_inversion(
-                                    state_dict["clip_g"], 
-                                    token=token, 
-                                    text_encoder=pipe.text_encoder_2, 
-                                    tokenizer=pipe.tokenizer_2
-                                )
-                                log("info", f"Loaded SDXL multi-encoder embedding (manual): {emb_path.name}")
-                                if is_neg:
-                                    neg_tokens.append(token)
-                                else:
-                                    pos_tokens.append(token)
-                                continue
-                        
-                        # Re-raise original exception if fallback doesn't apply
-                        raise exc
-                    except Exception as nested_exc:
-                        log("error", f"Failed to load embedding {emb_path.name}: {nested_exc}")
-                        raise HTTPException(status_code=400, detail=f"Failed to load embedding {emb_path.name}: {nested_exc}") from nested_exc
     
     return pos_tokens, neg_tokens
 
@@ -1233,6 +1247,9 @@ def _txt2img_sync(request: Text2ImageRequest) -> InferenceResponse:
             final_negative_prompt = f"{final_negative_prompt}, {', '.join(neg_tokens)}"
         else:
             final_negative_prompt = ", ".join(neg_tokens)
+    
+    log("info", f"Final prompt: {final_prompt}")
+    log("info", f"Final negative prompt: {final_negative_prompt}")
 
     batch_size = safe_batch_size(request.batch_size)
     base_seed = request.seed if request.seed != -1 else torch.Generator().seed()
@@ -1313,6 +1330,9 @@ def _img2img_sync(request: Image2ImageRequest) -> InferenceResponse:
             final_negative_prompt = f"{final_negative_prompt}, {', '.join(neg_tokens)}"
         else:
             final_negative_prompt = ", ".join(neg_tokens)
+    
+    log("info", f"Final prompt: {final_prompt}")
+    log("info", f"Final negative prompt: {final_negative_prompt}")
 
     init_image = load_image_any(request.image)
 
@@ -1393,6 +1413,9 @@ def _controlnet_sync(request: ControlNetRequest) -> InferenceResponse:
             final_negative_prompt = f"{final_negative_prompt}, {', '.join(neg_tokens)}"
         else:
             final_negative_prompt = ", ".join(neg_tokens)
+    
+    log("info", f"Final prompt: {final_prompt}")
+    log("info", f"Final negative prompt: {final_negative_prompt}")
 
     control_image = load_image_any(request.image)
 
@@ -1520,6 +1543,9 @@ def _txt2vid_sync(request: Text2VideoRequest) -> dict[str, Any]:
             final_negative_prompt = f"{final_negative_prompt}, {', '.join(neg_tokens)}"
         else:
             final_negative_prompt = ", ".join(neg_tokens)
+    
+    log("info", f"Final prompt: {final_prompt}")
+    log("info", f"Final negative prompt: {final_negative_prompt}")
 
     seed = request.seed if request.seed != -1 else torch.Generator().seed()
     generator = torch.Generator(device="cpu").manual_seed(seed)
@@ -1593,6 +1619,9 @@ def _img2vid_sync(request: Image2VideoRequest) -> dict[str, Any]:
             final_negative_prompt = f"{final_negative_prompt}, {', '.join(neg_tokens)}"
         else:
             final_negative_prompt = ", ".join(neg_tokens)
+    
+    log("info", f"Final prompt: {final_prompt}")
+    log("info", f"Final negative prompt: {final_negative_prompt}")
 
     seed = request.seed if request.seed != -1 else torch.Generator().seed()
     generator = torch.Generator(device="cpu").manual_seed(seed)
