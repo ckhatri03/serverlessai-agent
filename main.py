@@ -722,6 +722,17 @@ async def download_model(request: DownloadModelRequest) -> DownloadModelResponse
     return DownloadModelResponse(path=str(target), bytes=target.stat().st_size)
 
 
+def get_progress_callback(batch_index: int, total_batch: int, total_steps: int):
+    """Returns a callback for Diffusers to log progress."""
+    def callback(pipe, step_index, timestep, callback_kwargs):
+        # step_index is 0-indexed
+        progress = (step_index + 1) / total_steps * 100
+        if (step_index + 1) % 5 == 0 or (step_index + 1) == total_steps:
+            log("info", f"[PROGRESS] Image {batch_index + 1}/{total_batch} Step {step_index + 1}/{total_steps} ({progress:.1f}%)")
+        return callback_kwargs
+    return callback
+
+
 class PipelineManager:
     def __init__(self):
         self.current_model_id = None
@@ -913,6 +924,10 @@ async def start_generate_job(request: GenerateJobRequest, background_tasks: Back
 
 @app.post("/api/v1/upscale", response_model=UpscaleResponse, dependencies=[Depends(require_agent_auth)])
 async def upscale_image(request: UpscaleRequest) -> UpscaleResponse:
+    return await asyncio.to_thread(_upscale_image_sync, request)
+
+
+def _upscale_image_sync(request: UpscaleRequest) -> UpscaleResponse:
     start_time = time.time()
     from spandrel import ImageModelDescriptor, ModelLoader
     
@@ -1051,6 +1066,10 @@ def safe_batch_size(value: int) -> int:
 
 @app.post("/api/v1/txt2img", response_model=InferenceResponse, dependencies=[Depends(require_agent_auth)])
 async def txt2img(request: Text2ImageRequest) -> InferenceResponse:
+    return await asyncio.to_thread(_txt2img_sync, request)
+
+
+def _txt2img_sync(request: Text2ImageRequest) -> InferenceResponse:
     start_time = time.time()
     pipe = pipeline_manager.load_pipeline(request.model_id, "t2i", hf_token=request.hf_token)
     
@@ -1069,6 +1088,9 @@ async def txt2img(request: Text2ImageRequest) -> InferenceResponse:
     for index in range(batch_size):
         seed = base_seed + index
         generator = torch.Generator(device=device).manual_seed(seed)
+        
+        callback = get_progress_callback(index, batch_size, request.num_inference_steps)
+        
         output = pipe(
             prompt=request.prompt,
             negative_prompt=request.negative_prompt,
@@ -1077,6 +1099,7 @@ async def txt2img(request: Text2ImageRequest) -> InferenceResponse:
             num_inference_steps=request.num_inference_steps,
             guidance_scale=request.guidance_scale,
             generator=generator,
+            callback_on_step_end=callback,
         ).images[0]
 
         filename = f"{uuid.uuid4()}.png"
@@ -1095,6 +1118,10 @@ async def txt2img(request: Text2ImageRequest) -> InferenceResponse:
 
 @app.post("/api/v1/img2img", response_model=InferenceResponse, dependencies=[Depends(require_agent_auth)])
 async def img2img(request: Image2ImageRequest) -> InferenceResponse:
+    return await asyncio.to_thread(_img2img_sync, request)
+
+
+def _img2img_sync(request: Image2ImageRequest) -> InferenceResponse:
     start_time = time.time()
     pipe = pipeline_manager.load_pipeline(request.model_id, "i2i", hf_token=request.hf_token)
     
@@ -1115,6 +1142,9 @@ async def img2img(request: Image2ImageRequest) -> InferenceResponse:
     for index in range(batch_size):
         seed = base_seed + index
         generator = torch.Generator(device=device).manual_seed(seed)
+        
+        callback = get_progress_callback(index, batch_size, request.num_inference_steps)
+        
         output = pipe(
             prompt=request.prompt,
             negative_prompt=request.negative_prompt,
@@ -1123,6 +1153,7 @@ async def img2img(request: Image2ImageRequest) -> InferenceResponse:
             num_inference_steps=request.num_inference_steps,
             guidance_scale=request.guidance_scale,
             generator=generator,
+            callback_on_step_end=callback,
         ).images[0]
 
         filename = f"{uuid.uuid4()}.png"
@@ -1141,6 +1172,10 @@ async def img2img(request: Image2ImageRequest) -> InferenceResponse:
 
 @app.post("/api/v1/controlnet", response_model=InferenceResponse, dependencies=[Depends(require_agent_auth)])
 async def controlnet_inference(request: ControlNetRequest) -> InferenceResponse:
+    return await asyncio.to_thread(_controlnet_sync, request)
+
+
+def _controlnet_sync(request: ControlNetRequest) -> InferenceResponse:
     start_time = time.time()
     pipe = pipeline_manager.load_pipeline(request.model_id, "controlnet", request.controlnet_model_id, hf_token=request.hf_token)
     
@@ -1154,6 +1189,8 @@ async def controlnet_inference(request: ControlNetRequest) -> InferenceResponse:
     seed = request.seed if request.seed != -1 else torch.Generator().seed()
     generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(seed)
     
+    callback = get_progress_callback(0, 1, request.num_inference_steps)
+    
     output = pipe(
         prompt=request.prompt,
         negative_prompt=request.negative_prompt,
@@ -1164,6 +1201,7 @@ async def controlnet_inference(request: ControlNetRequest) -> InferenceResponse:
         num_inference_steps=request.num_inference_steps,
         guidance_scale=request.guidance_scale,
         generator=generator,
+        callback_on_step_end=callback,
     ).images[0]
     
     filename = f"{uuid.uuid4()}.png"
@@ -1179,6 +1217,10 @@ async def controlnet_inference(request: ControlNetRequest) -> InferenceResponse:
 
 @app.post("/api/v1/faceswap", response_model=InferenceResponse, dependencies=[Depends(require_agent_auth)])
 async def faceswap(request: FaceSwapRequest) -> InferenceResponse:
+    return await asyncio.to_thread(_faceswap_sync, request)
+
+
+def _faceswap_sync(request: FaceSwapRequest) -> InferenceResponse:
     start_time = time.time()
     import cv2
     import numpy as np
@@ -1227,6 +1269,10 @@ async def faceswap(request: FaceSwapRequest) -> InferenceResponse:
 
 @app.post("/api/v1/txt2vid", response_model=dict[str, Any], dependencies=[Depends(require_agent_auth)])
 async def txt2vid(request: Text2VideoRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(_txt2vid_sync, request)
+
+
+def _txt2vid_sync(request: Text2VideoRequest) -> dict[str, Any]:
     start_time = time.time()
     pipe = pipeline_manager.load_pipeline(request.model_id, "t2v", hf_token=request.hf_token)
     
@@ -1238,6 +1284,8 @@ async def txt2vid(request: Text2VideoRequest) -> dict[str, Any]:
     seed = request.seed if request.seed != -1 else torch.Generator().seed()
     generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(seed)
     
+    callback = get_progress_callback(0, 1, request.num_inference_steps)
+    
     video = pipe(
         prompt=request.prompt,
         negative_prompt=request.negative_prompt,
@@ -1247,6 +1295,7 @@ async def txt2vid(request: Text2VideoRequest) -> dict[str, Any]:
         num_inference_steps=request.num_inference_steps,
         guidance_scale=request.guidance_scale,
         generator=generator,
+        callback_on_step_end=callback,
     ).frames[0]
     
     filename = f"{uuid.uuid4()}.mp4"
@@ -1262,6 +1311,10 @@ async def txt2vid(request: Text2VideoRequest) -> dict[str, Any]:
 
 @app.post("/api/v1/img2vid", response_model=dict[str, Any], dependencies=[Depends(require_agent_auth)])
 async def img2vid(request: Image2VideoRequest) -> dict[str, Any]:
+    return await asyncio.to_thread(_img2vid_sync, request)
+
+
+def _img2vid_sync(request: Image2VideoRequest) -> dict[str, Any]:
     start_time = time.time()
     pipe = pipeline_manager.load_pipeline(request.model_id, "i2v", hf_token=request.hf_token)
     init_image = load_image_any(request.image)
@@ -1274,6 +1327,8 @@ async def img2vid(request: Image2VideoRequest) -> dict[str, Any]:
     seed = request.seed if request.seed != -1 else torch.Generator().seed()
     generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(seed)
     
+    callback = get_progress_callback(0, 1, request.num_inference_steps)
+    
     video = pipe(
         image=init_image,
         prompt=request.prompt,
@@ -1284,6 +1339,7 @@ async def img2vid(request: Image2VideoRequest) -> dict[str, Any]:
         num_inference_steps=request.num_inference_steps,
         guidance_scale=request.guidance_scale,
         generator=generator,
+        callback_on_step_end=callback,
     ).frames[0]
     
     filename = f"{uuid.uuid4()}.mp4"
