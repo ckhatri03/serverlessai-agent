@@ -1146,6 +1146,9 @@ def apply_loras_and_embeddings(pipe, loras: list[dict], embeddings: list[dict]):
     if embeddings:
         if not hasattr(pipe, "load_textual_inversion"):
             raise HTTPException(status_code=400, detail="Selected model pipeline does not support textual inversion embeddings")
+        
+        from safetensors.torch import load_file
+
         for emb in embeddings:
             path = emb.get("path")
             if path:
@@ -1157,10 +1160,36 @@ def apply_loras_and_embeddings(pipe, loras: list[dict], embeddings: list[dict]):
                     raise HTTPException(status_code=404, detail=f"Embedding not found: {path}")
 
                 try:
+                    # Try default loading first
                     pipe.load_textual_inversion(str(emb_path))
                     log("info", f"Loaded specific embedding: {emb_path.name}")
                 except Exception as exc:
-                    raise HTTPException(status_code=400, detail=f"Failed to load embedding {emb_path.name}: {exc}") from exc
+                    # Fallback for SDXL multi-encoder embeddings (e.g. Kohya style with clip_l/clip_g)
+                    try:
+                        if emb_path.suffix == ".safetensors" and hasattr(pipe, "text_encoder_2"):
+                            state_dict = load_file(str(emb_path))
+                            if "clip_l" in state_dict and "clip_g" in state_dict:
+                                token = emb_path.stem
+                                pipe.load_textual_inversion(
+                                    state_dict["clip_l"], 
+                                    token=token, 
+                                    text_encoder=pipe.text_encoder, 
+                                    tokenizer=pipe.tokenizer
+                                )
+                                pipe.load_textual_inversion(
+                                    state_dict["clip_g"], 
+                                    token=token, 
+                                    text_encoder=pipe.text_encoder_2, 
+                                    tokenizer=pipe.tokenizer_2
+                                )
+                                log("info", f"Loaded SDXL multi-encoder embedding (manual): {emb_path.name}")
+                                continue
+                        
+                        # Re-raise original exception if fallback doesn't apply
+                        raise exc
+                    except Exception as nested_exc:
+                        log("error", f"Failed to load embedding {emb_path.name}: {nested_exc}")
+                        raise HTTPException(status_code=400, detail=f"Failed to load embedding {emb_path.name}: {nested_exc}") from nested_exc
 
 
 def safe_batch_size(value: int) -> int:
