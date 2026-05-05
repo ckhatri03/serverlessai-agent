@@ -110,7 +110,11 @@ def control_plane_v1_url() -> str:
     return f"{url}/api/v1"
 
 
-def report_workflow_event(user_id: str, workflow_id: str, event: str, success: bool, error: str = "", output: str = "", agent_id: str | None = None):
+def report_workflow_event(user_id: str, workflow_id: str, event: str, success: bool, 
+                          error: str = "", output: str = "", agent_id: str | None = None,
+                          current_step: int = 0, total_steps: int = 0, 
+                          batch_index: int = 0, batch_size: int = 0, 
+                          percentage: float = 0.0):
     if not settings.control_plane_url:
         return
 
@@ -128,7 +132,12 @@ def report_workflow_event(user_id: str, workflow_id: str, event: str, success: b
             "event": event,
             "success": success,
             "error": error,
-            "output": output
+            "output": output,
+            "currentStep": current_step,
+            "totalSteps": total_steps,
+            "batchIndex": batch_index,
+            "batchSize": batch_size,
+            "percentage": percentage
         }
         resp = requests.post(url, json=payload, headers=headers, timeout=10)
         if resp.status_code != 200:
@@ -326,6 +335,7 @@ class ShutdownRequest(BaseModel):
 
 class Text2ImageRequest(BaseModel):
     user_id: str | None = None
+    job_id: str | None = None
     model_id: str
     prompt: str
     negative_prompt: str | None = None
@@ -344,6 +354,7 @@ class Text2ImageRequest(BaseModel):
 
 class Image2ImageRequest(BaseModel):
     user_id: str | None = None
+    job_id: str | None = None
     model_id: str
     image: str  # File path relative to input root or URL
     prompt: str
@@ -379,6 +390,8 @@ class GenerateJobResponse(BaseModel):
 
 
 class ControlNetRequest(BaseModel):
+    user_id: str | None = None
+    job_id: str | None = None
     model_id: str
     controlnet_model_id: str
     image: str  # Control image (path or URL)
@@ -396,6 +409,8 @@ class ControlNetRequest(BaseModel):
 
 
 class FaceSwapRequest(BaseModel):
+    user_id: str | None = None
+    job_id: str | None = None
     source_image: str  # Face to use (path or URL)
     target_image: str  # Image to swap face into (path or URL)
     model_path: str | None = None  # Path to inswapper model
@@ -409,6 +424,8 @@ class OpenPoseRequest(BaseModel):
 
 
 class Text2VideoRequest(BaseModel):
+    user_id: str | None = None
+    job_id: str | None = None
     model_id: str
     prompt: str
     negative_prompt: str | None = None
@@ -425,6 +442,8 @@ class Text2VideoRequest(BaseModel):
 
 
 class Image2VideoRequest(BaseModel):
+    user_id: str | None = None
+    job_id: str | None = None
     model_id: str
     image: str  # Source image (path or URL)
     prompt: str
@@ -726,13 +745,21 @@ def _download_model_sync(request: DownloadModelRequest) -> DownloadModelResponse
     return DownloadModelResponse(path=str(target), bytes=target.stat().st_size)
 
 
-def get_progress_callback(batch_index: int, total_batch: int, total_steps: int):
+def get_progress_callback(user_id: str, workflow_id: str, batch_index: int, total_batch: int, total_steps: int):
     """Returns a callback for Diffusers to log progress."""
     def callback(pipe, step_index, timestep, callback_kwargs):
         # step_index is 0-indexed
         progress = (step_index + 1) / total_steps * 100
         if (step_index + 1) % 5 == 0 or (step_index + 1) == total_steps:
             log("info", f"[PROGRESS] Image {batch_index + 1}/{total_batch} Step {step_index + 1}/{total_steps} ({progress:.1f}%)")
+            # Reporting to control plane for UI progress bars
+            report_workflow_event(
+                user_id, workflow_id, "generation-progress", True, 
+                current_step=step_index + 1, total_steps=total_steps,
+                batch_index=batch_index, # Number of fully completed images so far
+                batch_size=total_batch,
+                percentage=progress
+            )
         return callback_kwargs
     return callback
 
@@ -887,6 +914,7 @@ async def run_generate_job(job_id: str, endpoint: str, payload: dict[str, Any]) 
     started = time.time()
     user_id = payload.get("user_id", "unknown")
     agent_id = payload.get("agent_id") or settings.agent_id
+    payload["job_id"] = job_id
     log("info", f"Generation job {job_id} started endpoint={endpoint} user={user_id}")
     try:
         if endpoint == "/api/v1/txt2img":
@@ -1093,7 +1121,13 @@ def _txt2img_sync(request: Text2ImageRequest) -> InferenceResponse:
         seed = base_seed + index
         generator = torch.Generator(device=device).manual_seed(seed)
         
-        callback = get_progress_callback(index, batch_size, request.num_inference_steps)
+        callback = get_progress_callback(
+            request.user_id or "unknown", 
+            request.job_id or "unknown", 
+            index, 
+            batch_size, 
+            request.num_inference_steps
+        )
         
         output = pipe(
             prompt=request.prompt,
@@ -1111,6 +1145,14 @@ def _txt2img_sync(request: Text2ImageRequest) -> InferenceResponse:
         output.save(save_path)
         image_paths.append(str(save_path))
         log("info", f"Generated batch image {index + 1}/{batch_size} seed={seed} output={save_path}")
+        report_workflow_event(
+            request.user_id or "unknown", 
+            request.job_id or "unknown", 
+            "batch-progress", 
+            True, 
+            batch_index=index + 1, 
+            batch_size=batch_size
+        )
     
     return InferenceResponse(
         image_path=str(save_path),
@@ -1147,7 +1189,13 @@ def _img2img_sync(request: Image2ImageRequest) -> InferenceResponse:
         seed = base_seed + index
         generator = torch.Generator(device=device).manual_seed(seed)
         
-        callback = get_progress_callback(index, batch_size, request.num_inference_steps)
+        callback = get_progress_callback(
+            request.user_id or "unknown", 
+            request.job_id or "unknown", 
+            index, 
+            batch_size, 
+            request.num_inference_steps
+        )
         
         output = pipe(
             prompt=request.prompt,
@@ -1165,6 +1213,14 @@ def _img2img_sync(request: Image2ImageRequest) -> InferenceResponse:
         output.save(save_path)
         image_paths.append(str(save_path))
         log("info", f"Generated batch image {index + 1}/{batch_size} seed={seed} output={save_path}")
+        report_workflow_event(
+            request.user_id or "unknown", 
+            request.job_id or "unknown", 
+            "batch-progress", 
+            True, 
+            batch_index=index + 1, 
+            batch_size=batch_size
+        )
     
     return InferenceResponse(
         image_path=str(save_path),
@@ -1193,7 +1249,13 @@ def _controlnet_sync(request: ControlNetRequest) -> InferenceResponse:
     seed = request.seed if request.seed != -1 else torch.Generator().seed()
     generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(seed)
     
-    callback = get_progress_callback(0, 1, request.num_inference_steps)
+    callback = get_progress_callback(
+        request.user_id or "unknown", 
+        request.job_id or "unknown", 
+        0, 
+        1, 
+        request.num_inference_steps
+    )
     
     output = pipe(
         prompt=request.prompt,
@@ -1211,6 +1273,15 @@ def _controlnet_sync(request: ControlNetRequest) -> InferenceResponse:
     filename = f"{uuid.uuid4()}.png"
     save_path = settings.outputs_dir / filename
     output.save(save_path)
+    
+    report_workflow_event(
+        request.user_id or "unknown", 
+        request.job_id or "unknown", 
+        "batch-progress", 
+        True, 
+        batch_index=1, 
+        batch_size=1
+    )
     
     return InferenceResponse(
         image_path=str(save_path),
@@ -1288,7 +1359,13 @@ def _txt2vid_sync(request: Text2VideoRequest) -> dict[str, Any]:
     seed = request.seed if request.seed != -1 else torch.Generator().seed()
     generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(seed)
     
-    callback = get_progress_callback(0, 1, request.num_inference_steps)
+    callback = get_progress_callback(
+        request.user_id or "unknown", 
+        request.job_id or "unknown", 
+        0, 
+        1, 
+        request.num_inference_steps
+    )
     
     video = pipe(
         prompt=request.prompt,
@@ -1305,6 +1382,15 @@ def _txt2vid_sync(request: Text2VideoRequest) -> dict[str, Any]:
     filename = f"{uuid.uuid4()}.mp4"
     save_path = settings.outputs_dir / filename
     export_to_video(video, str(save_path), fps=request.fps)
+    
+    report_workflow_event(
+        request.user_id or "unknown", 
+        request.job_id or "unknown", 
+        "batch-progress", 
+        True, 
+        batch_index=1, 
+        batch_size=1
+    )
     
     return {
         "video_path": str(save_path),
@@ -1331,7 +1417,13 @@ def _img2vid_sync(request: Image2VideoRequest) -> dict[str, Any]:
     seed = request.seed if request.seed != -1 else torch.Generator().seed()
     generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(seed)
     
-    callback = get_progress_callback(0, 1, request.num_inference_steps)
+    callback = get_progress_callback(
+        request.user_id or "unknown", 
+        request.job_id or "unknown", 
+        0, 
+        1, 
+        request.num_inference_steps
+    )
     
     video = pipe(
         image=init_image,
@@ -1349,6 +1441,15 @@ def _img2vid_sync(request: Image2VideoRequest) -> dict[str, Any]:
     filename = f"{uuid.uuid4()}.mp4"
     save_path = settings.outputs_dir / filename
     export_to_video(video, str(save_path), fps=request.fps)
+    
+    report_workflow_event(
+        request.user_id or "unknown", 
+        request.job_id or "unknown", 
+        "batch-progress", 
+        True, 
+        batch_index=1, 
+        batch_size=1
+    )
     
     return {
         "video_path": str(save_path),
