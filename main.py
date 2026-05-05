@@ -74,6 +74,37 @@ class Settings(BaseModel):
 
 settings = Settings()
 
+# Global state for guardrails
+active_downloads = set()
+download_lock = asyncio.Lock()
+active_generation_job = None
+job_lock = asyncio.Lock()
+
+@asynccontextmanager
+async def generation_session(job_id: str):
+    """Guardrail to ensure only one generation job runs at a time."""
+    global active_generation_job
+    if active_generation_job is not None and active_generation_job != job_id:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Another job is already running: {active_generation_job}. Please wait for it to complete."
+        )
+    
+    # If it's already set to the same job_id, we are in a nested call (e.g. from run_generate_job)
+    is_nested = (active_generation_job == job_id)
+    
+    if not is_nested:
+        active_generation_job = job_id
+        log("info", f"Started generation session for job: {job_id}")
+        
+    try:
+        yield
+    finally:
+        if not is_nested:
+            if active_generation_job == job_id:
+                active_generation_job = None
+                log("info", f"Finished generation session for job: {job_id}")
+
 # Force HF and Transformers cache to /workspace to avoid filling container disk
 os.environ["HF_HOME"] = str(settings.hf_home)
 os.environ["TRANSFORMERS_CACHE"] = str(settings.hf_home / "transformers")
@@ -696,17 +727,39 @@ logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
 
 @app.post("/download-model", response_model=DownloadModelResponse, dependencies=[Depends(require_agent_auth)])
 async def download_model(request: DownloadModelRequest) -> DownloadModelResponse:
-    return await asyncio.to_thread(_download_model_sync, request)
+    target = ensure_child_path(settings.models_dir, request.destination)
+    
+    # Guardrail 1: check if already exists
+    if target.exists() and not request.overwrite:
+        log("info", f"Download skipped, file already exists: {target}")
+        return DownloadModelResponse(path=str(target), bytes=target.stat().st_size)
+
+    # Guardrail 2: only one download at a time
+    if download_lock.locked():
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS, 
+            detail="Another download is already in progress. Please wait for it to complete."
+        )
+
+    async with download_lock:
+        return await asyncio.to_thread(_download_model_sync, request)
 
 
 def _download_model_sync(request: DownloadModelRequest) -> DownloadModelResponse:
     target = ensure_child_path(settings.models_dir, request.destination)
+    # Double check inside sync just in case
     if target.exists() and not request.overwrite:
         return DownloadModelResponse(path=str(target), bytes=target.stat().st_size)
 
     target.parent.mkdir(parents=True, exist_ok=True)
     
     effective_hf_token = request.hf_token or settings.hf_token or None
+    temporary_target = target.with_suffix(target.suffix + ".download")
+
+    # Guardrail 3: remove partial file if it exists from a previous failed/interrupted attempt
+    if temporary_target.exists():
+        log("info", f"Removing partial download file: {temporary_target}")
+        temporary_target.unlink()
 
     if request.repo_id:
         from huggingface_hub import hf_hub_download
@@ -728,8 +781,6 @@ def _download_model_sync(request: DownloadModelRequest) -> DownloadModelResponse
 
     if not request.url:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Either url or repo_id must be provided")
-
-    temporary_target = target.with_suffix(target.suffix + ".download")
 
     try:
         with requests.get(request.url, stream=True, timeout=30) as response:
@@ -948,15 +999,35 @@ async def run_generate_job(job_id: str, endpoint: str, payload: dict[str, Any]) 
 
 @app.post("/api/v1/jobs/generate", response_model=GenerateJobResponse, dependencies=[Depends(require_agent_auth)])
 async def start_generate_job(request: GenerateJobRequest, background_tasks: BackgroundTasks) -> GenerateJobResponse:
+    global active_generation_job
+    
+    if active_generation_job is not None:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Another job is already running: {active_generation_job}. Please wait for it to complete."
+        )
+
     job_id = request.job_id or f"job-{uuid.uuid4()}"
-    background_tasks.add_task(run_generate_job, job_id, request.endpoint, request.payload)
+    active_generation_job = job_id
+    
+    background_tasks.add_task(run_generate_job_wrapper, job_id, request.endpoint, request.payload)
     log("info", f"Queued generation job {job_id} endpoint={request.endpoint}")
     return GenerateJobResponse(job_id=job_id, status="queued")
 
 
+async def run_generate_job_wrapper(job_id: str, endpoint: str, payload: dict[str, Any]) -> None:
+    global active_generation_job
+    try:
+        await run_generate_job(job_id, endpoint, payload)
+    finally:
+        if active_generation_job == job_id:
+            active_generation_job = None
+
+
 @app.post("/api/v1/upscale", response_model=UpscaleResponse, dependencies=[Depends(require_agent_auth)])
 async def upscale_image(request: UpscaleRequest) -> UpscaleResponse:
-    return await asyncio.to_thread(_upscale_image_sync, request)
+    async with generation_session("upscale"):
+        return await asyncio.to_thread(_upscale_image_sync, request)
 
 
 def _upscale_image_sync(request: UpscaleRequest) -> UpscaleResponse:
@@ -1098,7 +1169,8 @@ def safe_batch_size(value: int) -> int:
 
 @app.post("/api/v1/txt2img", response_model=InferenceResponse, dependencies=[Depends(require_agent_auth)])
 async def txt2img(request: Text2ImageRequest) -> InferenceResponse:
-    return await asyncio.to_thread(_txt2img_sync, request)
+    async with generation_session(request.job_id or "txt2img"):
+        return await asyncio.to_thread(_txt2img_sync, request)
 
 
 def _txt2img_sync(request: Text2ImageRequest) -> InferenceResponse:
@@ -1164,7 +1236,8 @@ def _txt2img_sync(request: Text2ImageRequest) -> InferenceResponse:
 
 @app.post("/api/v1/img2img", response_model=InferenceResponse, dependencies=[Depends(require_agent_auth)])
 async def img2img(request: Image2ImageRequest) -> InferenceResponse:
-    return await asyncio.to_thread(_img2img_sync, request)
+    async with generation_session(request.job_id or "img2img"):
+        return await asyncio.to_thread(_img2img_sync, request)
 
 
 def _img2img_sync(request: Image2ImageRequest) -> InferenceResponse:
@@ -1232,7 +1305,8 @@ def _img2img_sync(request: Image2ImageRequest) -> InferenceResponse:
 
 @app.post("/api/v1/controlnet", response_model=InferenceResponse, dependencies=[Depends(require_agent_auth)])
 async def controlnet_inference(request: ControlNetRequest) -> InferenceResponse:
-    return await asyncio.to_thread(_controlnet_sync, request)
+    async with generation_session(request.job_id or "controlnet"):
+        return await asyncio.to_thread(_controlnet_sync, request)
 
 
 def _controlnet_sync(request: ControlNetRequest) -> InferenceResponse:
@@ -1292,7 +1366,8 @@ def _controlnet_sync(request: ControlNetRequest) -> InferenceResponse:
 
 @app.post("/api/v1/faceswap", response_model=InferenceResponse, dependencies=[Depends(require_agent_auth)])
 async def faceswap(request: FaceSwapRequest) -> InferenceResponse:
-    return await asyncio.to_thread(_faceswap_sync, request)
+    async with generation_session(request.job_id or "faceswap"):
+        return await asyncio.to_thread(_faceswap_sync, request)
 
 
 def _faceswap_sync(request: FaceSwapRequest) -> InferenceResponse:
@@ -1344,7 +1419,8 @@ def _faceswap_sync(request: FaceSwapRequest) -> InferenceResponse:
 
 @app.post("/api/v1/txt2vid", response_model=dict[str, Any], dependencies=[Depends(require_agent_auth)])
 async def txt2vid(request: Text2VideoRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(_txt2vid_sync, request)
+    async with generation_session(request.job_id or "txt2vid"):
+        return await asyncio.to_thread(_txt2vid_sync, request)
 
 
 def _txt2vid_sync(request: Text2VideoRequest) -> dict[str, Any]:
@@ -1401,7 +1477,8 @@ def _txt2vid_sync(request: Text2VideoRequest) -> dict[str, Any]:
 
 @app.post("/api/v1/img2vid", response_model=dict[str, Any], dependencies=[Depends(require_agent_auth)])
 async def img2vid(request: Image2VideoRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(_img2vid_sync, request)
+    async with generation_session(request.job_id or "img2vid"):
+        return await asyncio.to_thread(_img2vid_sync, request)
 
 
 def _img2vid_sync(request: Image2VideoRequest) -> dict[str, Any]:
@@ -1460,7 +1537,8 @@ def _img2vid_sync(request: Image2VideoRequest) -> dict[str, Any]:
 
 @app.post("/api/v1/preprocess/openpose", response_model=dict[str, str], dependencies=[Depends(require_agent_auth)])
 async def preprocess_openpose(request: OpenPoseRequest) -> dict[str, str]:
-    return await asyncio.to_thread(_preprocess_openpose_sync, request)
+    async with generation_session("openpose"):
+        return await asyncio.to_thread(_preprocess_openpose_sync, request)
 
 
 def _preprocess_openpose_sync(request: OpenPoseRequest) -> dict[str, str]:
