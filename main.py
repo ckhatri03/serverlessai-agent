@@ -1100,9 +1100,9 @@ def load_image_any(image_src: str) -> Image.Image:
     return Image.open(image_path).convert("RGB")
 
 
-def apply_loras_and_embeddings(pipe, loras: list[dict], embeddings: list[dict]):
-    # Load selected LoRAs. Missing selected assets are hard failures; otherwise
-    # Studio appears to accept a LoRA while generation silently ignores it.
+def apply_loras_and_embeddings(pipe, loras: list[dict], embeddings: list[dict]) -> tuple[list[str], list[str]]:
+    """Loads LoRAs and embeddings, returning (positive_tokens, negative_tokens) for prompt injection."""
+    # Load selected LoRAs...
     if loras:
         if not hasattr(pipe, "load_lora_weights"):
             raise HTTPException(status_code=400, detail="Selected model pipeline does not support LoRA weights")
@@ -1142,6 +1142,9 @@ def apply_loras_and_embeddings(pipe, loras: list[dict], embeddings: list[dict]):
             except Exception as exc:
                 raise HTTPException(status_code=400, detail=f"Failed to activate LoRA adapters: {exc}") from exc
 
+    pos_tokens: list[str] = []
+    neg_tokens: list[str] = []
+
     # Load selected textual inversion embeddings.
     if embeddings:
         if not hasattr(pipe, "load_textual_inversion"):
@@ -1151,6 +1154,7 @@ def apply_loras_and_embeddings(pipe, loras: list[dict], embeddings: list[dict]):
 
         for emb in embeddings:
             path = emb.get("path")
+            is_neg = emb.get("is_negative", False)
             if path:
                 emb_path = Path(path)
                 if not emb_path.is_absolute():
@@ -1159,17 +1163,21 @@ def apply_loras_and_embeddings(pipe, loras: list[dict], embeddings: list[dict]):
                 if not emb_path.exists():
                     raise HTTPException(status_code=404, detail=f"Embedding not found: {path}")
 
+                token = emb_path.stem
                 try:
                     # Try default loading first
                     pipe.load_textual_inversion(str(emb_path))
                     log("info", f"Loaded specific embedding: {emb_path.name}")
+                    if is_neg:
+                        neg_tokens.append(token)
+                    else:
+                        pos_tokens.append(token)
                 except Exception as exc:
                     # Fallback for SDXL multi-encoder embeddings (e.g. Kohya style with clip_l/clip_g)
                     try:
                         if emb_path.suffix == ".safetensors" and hasattr(pipe, "text_encoder_2"):
                             state_dict = load_file(str(emb_path))
                             if "clip_l" in state_dict and "clip_g" in state_dict:
-                                token = emb_path.stem
                                 pipe.load_textual_inversion(
                                     state_dict["clip_l"], 
                                     token=token, 
@@ -1183,6 +1191,10 @@ def apply_loras_and_embeddings(pipe, loras: list[dict], embeddings: list[dict]):
                                     tokenizer=pipe.tokenizer_2
                                 )
                                 log("info", f"Loaded SDXL multi-encoder embedding (manual): {emb_path.name}")
+                                if is_neg:
+                                    neg_tokens.append(token)
+                                else:
+                                    pos_tokens.append(token)
                                 continue
                         
                         # Re-raise original exception if fallback doesn't apply
@@ -1190,6 +1202,8 @@ def apply_loras_and_embeddings(pipe, loras: list[dict], embeddings: list[dict]):
                     except Exception as nested_exc:
                         log("error", f"Failed to load embedding {emb_path.name}: {nested_exc}")
                         raise HTTPException(status_code=400, detail=f"Failed to load embedding {emb_path.name}: {nested_exc}") from nested_exc
+    
+    return pos_tokens, neg_tokens
 
 
 def safe_batch_size(value: int) -> int:
@@ -1207,11 +1221,25 @@ def _txt2img_sync(request: Text2ImageRequest) -> InferenceResponse:
     pipe = pipeline_manager.load_pipeline(request.model_id, "t2i", hf_token=request.hf_token)
     
     # Apply LoRAs and Embeddings
+    pos_tokens, neg_tokens = [], []
     if request.loras or request.embeddings:
         pipeline_manager.has_loras = True
-    apply_loras_and_embeddings(pipe, request.loras, request.embeddings)
+        pos_tokens, neg_tokens = apply_loras_and_embeddings(pipe, request.loras, request.embeddings)
+    
     apply_scheduler(pipe, request.sampler_name, request.scheduler)
     
+    # Inject embedding tokens into prompts
+    final_prompt = request.prompt
+    if pos_tokens:
+        final_prompt = f"{final_prompt}, {', '.join(pos_tokens)}"
+    
+    final_negative_prompt = request.negative_prompt or ""
+    if neg_tokens:
+        if final_negative_prompt:
+            final_negative_prompt = f"{final_negative_prompt}, {', '.join(neg_tokens)}"
+        else:
+            final_negative_prompt = ", ".join(neg_tokens)
+
     batch_size = safe_batch_size(request.batch_size)
     base_seed = request.seed if request.seed != -1 else torch.Generator().seed()
     image_paths: list[str] = []
@@ -1231,8 +1259,8 @@ def _txt2img_sync(request: Text2ImageRequest) -> InferenceResponse:
         )
         
         output = pipe(
-            prompt=request.prompt,
-            negative_prompt=request.negative_prompt,
+            prompt=final_prompt,
+            negative_prompt=final_negative_prompt,
             width=request.width,
             height=request.height,
             num_inference_steps=request.num_inference_steps,
@@ -1274,11 +1302,25 @@ def _img2img_sync(request: Image2ImageRequest) -> InferenceResponse:
     pipe = pipeline_manager.load_pipeline(request.model_id, "i2i", hf_token=request.hf_token)
     
     # Apply LoRAs and Embeddings
+    pos_tokens, neg_tokens = [], []
     if request.loras or request.embeddings:
         pipeline_manager.has_loras = True
-    apply_loras_and_embeddings(pipe, request.loras, request.embeddings)
+        pos_tokens, neg_tokens = apply_loras_and_embeddings(pipe, request.loras, request.embeddings)
+    
     apply_scheduler(pipe, request.sampler_name, request.scheduler)
     
+    # Inject embedding tokens into prompts
+    final_prompt = request.prompt
+    if pos_tokens:
+        final_prompt = f"{final_prompt}, {', '.join(pos_tokens)}"
+    
+    final_negative_prompt = request.negative_prompt or ""
+    if neg_tokens:
+        if final_negative_prompt:
+            final_negative_prompt = f"{final_negative_prompt}, {', '.join(neg_tokens)}"
+        else:
+            final_negative_prompt = ", ".join(neg_tokens)
+
     init_image = load_image_any(request.image)
 
     batch_size = safe_batch_size(request.batch_size)
@@ -1300,8 +1342,8 @@ def _img2img_sync(request: Image2ImageRequest) -> InferenceResponse:
         )
         
         output = pipe(
-            prompt=request.prompt,
-            negative_prompt=request.negative_prompt,
+            prompt=final_prompt,
+            negative_prompt=final_negative_prompt,
             image=init_image,
             strength=request.strength,
             num_inference_steps=request.num_inference_steps,
@@ -1343,10 +1385,23 @@ def _controlnet_sync(request: ControlNetRequest) -> InferenceResponse:
     pipe = pipeline_manager.load_pipeline(request.model_id, "controlnet", request.controlnet_model_id, hf_token=request.hf_token)
     
     # Apply LoRAs and Embeddings
+    pos_tokens, neg_tokens = [], []
     if request.loras or request.embeddings:
         pipeline_manager.has_loras = True
-    apply_loras_and_embeddings(pipe, request.loras, request.embeddings)
+        pos_tokens, neg_tokens = apply_loras_and_embeddings(pipe, request.loras, request.embeddings)
     
+    # Inject embedding tokens into prompts
+    final_prompt = request.prompt
+    if pos_tokens:
+        final_prompt = f"{final_prompt}, {', '.join(pos_tokens)}"
+    
+    final_negative_prompt = request.negative_prompt or ""
+    if neg_tokens:
+        if final_negative_prompt:
+            final_negative_prompt = f"{final_negative_prompt}, {', '.join(neg_tokens)}"
+        else:
+            final_negative_prompt = ", ".join(neg_tokens)
+
     control_image = load_image_any(request.image)
 
     seed = request.seed if request.seed != -1 else torch.Generator().seed()
@@ -1361,8 +1416,8 @@ def _controlnet_sync(request: ControlNetRequest) -> InferenceResponse:
     )
     
     output = pipe(
-        prompt=request.prompt,
-        negative_prompt=request.negative_prompt,
+        prompt=final_prompt,
+        negative_prompt=final_negative_prompt,
         image=control_image,
         controlnet_conditioning_scale=request.controlnet_conditioning_scale,
         width=request.width,
@@ -1455,15 +1510,28 @@ async def txt2vid(request: Text2VideoRequest) -> dict[str, Any]:
 def _txt2vid_sync(request: Text2VideoRequest) -> dict[str, Any]:
     start_time = time.time()
     pipe = pipeline_manager.load_pipeline(request.model_id, "t2v", hf_token=request.hf_token)
-    
+
     # Apply LoRAs and Embeddings
+    pos_tokens, neg_tokens = [], []
     if request.loras or request.embeddings:
         pipeline_manager.has_loras = True
-    apply_loras_and_embeddings(pipe, request.loras, request.embeddings)
-    
+        pos_tokens, neg_tokens = apply_loras_and_embeddings(pipe, request.loras, request.embeddings)
+
+    # Inject embedding tokens into prompts
+    final_prompt = request.prompt
+    if pos_tokens:
+        final_prompt = f"{final_prompt}, {', '.join(pos_tokens)}"
+
+    final_negative_prompt = request.negative_prompt or ""
+    if neg_tokens:
+        if final_negative_prompt:
+            final_negative_prompt = f"{final_negative_prompt}, {', '.join(neg_tokens)}"
+        else:
+            final_negative_prompt = ", ".join(neg_tokens)
+
     seed = request.seed if request.seed != -1 else torch.Generator().seed()
     generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(seed)
-    
+
     callback = get_progress_callback(
         request.user_id or "unknown", 
         request.job_id or "unknown", 
@@ -1471,11 +1539,12 @@ def _txt2vid_sync(request: Text2VideoRequest) -> dict[str, Any]:
         1, 
         request.num_inference_steps
     )
-    
+
     video = pipe(
-        prompt=request.prompt,
-        negative_prompt=request.negative_prompt,
+        prompt=final_prompt,
+        negative_prompt=final_negative_prompt,
         width=request.width,
+
         height=request.height,
         num_frames=request.num_frames,
         num_inference_steps=request.num_inference_steps,
@@ -1516,10 +1585,23 @@ def _img2vid_sync(request: Image2VideoRequest) -> dict[str, Any]:
     init_image = load_image_any(request.image)
     
     # Apply LoRAs and Embeddings
+    pos_tokens, neg_tokens = [], []
     if request.loras or request.embeddings:
         pipeline_manager.has_loras = True
-    apply_loras_and_embeddings(pipe, request.loras, request.embeddings)
+        pos_tokens, neg_tokens = apply_loras_and_embeddings(pipe, request.loras, request.embeddings)
     
+    # Inject embedding tokens into prompts
+    final_prompt = request.prompt
+    if pos_tokens:
+        final_prompt = f"{final_prompt}, {', '.join(pos_tokens)}"
+    
+    final_negative_prompt = request.negative_prompt or ""
+    if neg_tokens:
+        if final_negative_prompt:
+            final_negative_prompt = f"{final_negative_prompt}, {', '.join(neg_tokens)}"
+        else:
+            final_negative_prompt = ", ".join(neg_tokens)
+
     seed = request.seed if request.seed != -1 else torch.Generator().seed()
     generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(seed)
     
@@ -1533,8 +1615,8 @@ def _img2vid_sync(request: Image2VideoRequest) -> dict[str, Any]:
     
     video = pipe(
         image=init_image,
-        prompt=request.prompt,
-        negative_prompt=request.negative_prompt,
+        prompt=final_prompt,
+        negative_prompt=final_negative_prompt,
         width=request.width,
         height=request.height,
         num_frames=request.num_frames,
