@@ -677,6 +677,10 @@ logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
 
 @app.post("/download-model", response_model=DownloadModelResponse, dependencies=[Depends(require_agent_auth)])
 async def download_model(request: DownloadModelRequest) -> DownloadModelResponse:
+    return await asyncio.to_thread(_download_model_sync, request)
+
+
+def _download_model_sync(request: DownloadModelRequest) -> DownloadModelResponse:
     target = ensure_child_path(settings.models_dir, request.destination)
     if target.exists() and not request.overwrite:
         return DownloadModelResponse(path=str(target), bytes=target.stat().st_size)
@@ -907,11 +911,11 @@ async def run_generate_job(job_id: str, endpoint: str, payload: dict[str, Any]) 
             raise ValueError(f"Unsupported generation endpoint: {endpoint}")
 
         log("info", f"Generation job {job_id} complete output={output_path} duration={time.time() - started:.2f}s")
-        report_workflow_event(user_id, job_id, "generation-complete", True, output=output_path, agent_id=agent_id)
+        await asyncio.to_thread(report_workflow_event, user_id, job_id, "generation-complete", True, output=output_path, agent_id=agent_id)
     except Exception as exc:
         err_msg = f"{exc}\n{traceback.format_exc()}"
         log("error", f"Generation job {job_id} failed: {err_msg}")
-        report_workflow_event(user_id, job_id, "generation-failed", False, error=str(exc), agent_id=agent_id)
+        await asyncio.to_thread(report_workflow_event, user_id, job_id, "generation-failed", False, error=str(exc), agent_id=agent_id)
 
 
 @app.post("/api/v1/jobs/generate", response_model=GenerateJobResponse, dependencies=[Depends(require_agent_auth)])
@@ -1355,6 +1359,10 @@ def _img2vid_sync(request: Image2VideoRequest) -> dict[str, Any]:
 
 @app.post("/api/v1/preprocess/openpose", response_model=dict[str, str], dependencies=[Depends(require_agent_auth)])
 async def preprocess_openpose(request: OpenPoseRequest) -> dict[str, str]:
+    return await asyncio.to_thread(_preprocess_openpose_sync, request)
+
+
+def _preprocess_openpose_sync(request: OpenPoseRequest) -> dict[str, str]:
     from controlnet_aux import OpenposeDetector
     
     img = load_image_any(request.image)
@@ -1449,6 +1457,10 @@ async def upload_file(
     file: UploadFile = File(...),
     subfolder: str = "input"
 ) -> dict[str, str]:
+    return await asyncio.to_thread(_upload_file_sync, file, subfolder)
+
+
+def _upload_file_sync(file: UploadFile, subfolder: str) -> dict[str, str]:
     target_root = settings.workspace_dir / "input"
     target_root.mkdir(parents=True, exist_ok=True)
 
@@ -1565,6 +1577,10 @@ async def execute_command(request: ExecRequest) -> ExecResponse:
 
 @app.post("/upload-output", response_model=UploadOutputResponse, dependencies=[Depends(require_agent_auth)])
 async def upload_output(request: UploadOutputRequest) -> UploadOutputResponse:
+    return await asyncio.to_thread(_upload_output_sync, request)
+
+
+def _upload_output_sync(request: UploadOutputRequest) -> UploadOutputResponse:
     output_path = ensure_child_path(settings.outputs_dir, request.path)
     if not output_path.exists():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Output file not found")
