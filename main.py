@@ -116,12 +116,6 @@ def log(level: str, message: str) -> None:
     timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     line = f"{timestamp} [{level.upper()}] {message}"
     print(line, flush=True)
-    try:
-        settings.agent_log_file.parent.mkdir(parents=True, exist_ok=True)
-        with settings.agent_log_file.open("a", encoding="utf-8") as log_file:
-            log_file.write(line + "\n")
-    except Exception:
-        pass
 
 
 def control_plane_root_url() -> str:
@@ -1244,11 +1238,10 @@ def _txt2img_sync(request: Text2ImageRequest) -> InferenceResponse:
     base_seed = request.seed if request.seed != -1 else torch.Generator().seed()
     image_paths: list[str] = []
     save_path: Path | None = None
-    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     for index in range(batch_size):
         seed = base_seed + index
-        generator = torch.Generator(device=device).manual_seed(seed)
+        generator = torch.Generator(device="cpu").manual_seed(seed)
         
         callback = get_progress_callback(
             request.user_id or "unknown", 
@@ -1327,11 +1320,10 @@ def _img2img_sync(request: Image2ImageRequest) -> InferenceResponse:
     base_seed = request.seed if request.seed != -1 else torch.Generator().seed()
     image_paths: list[str] = []
     save_path: Path | None = None
-    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     for index in range(batch_size):
         seed = base_seed + index
-        generator = torch.Generator(device=device).manual_seed(seed)
+        generator = torch.Generator(device="cpu").manual_seed(seed)
         
         callback = get_progress_callback(
             request.user_id or "unknown", 
@@ -1405,7 +1397,7 @@ def _controlnet_sync(request: ControlNetRequest) -> InferenceResponse:
     control_image = load_image_any(request.image)
 
     seed = request.seed if request.seed != -1 else torch.Generator().seed()
-    generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(seed)
+    generator = torch.Generator(device="cpu").manual_seed(seed)
     
     callback = get_progress_callback(
         request.user_id or "unknown", 
@@ -1530,7 +1522,7 @@ def _txt2vid_sync(request: Text2VideoRequest) -> dict[str, Any]:
             final_negative_prompt = ", ".join(neg_tokens)
 
     seed = request.seed if request.seed != -1 else torch.Generator().seed()
-    generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(seed)
+    generator = torch.Generator(device="cpu").manual_seed(seed)
 
     callback = get_progress_callback(
         request.user_id or "unknown", 
@@ -1603,7 +1595,7 @@ def _img2vid_sync(request: Image2VideoRequest) -> dict[str, Any]:
             final_negative_prompt = ", ".join(neg_tokens)
 
     seed = request.seed if request.seed != -1 else torch.Generator().seed()
-    generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(seed)
+    generator = torch.Generator(device="cpu").manual_seed(seed)
     
     callback = get_progress_callback(
         request.user_id or "unknown", 
