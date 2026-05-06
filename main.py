@@ -935,9 +935,6 @@ class PipelineManager:
                     model_id, torch_dtype=dtype, use_safetensors=True, token=effective_hf_token
                 )
             
-            if torch.cuda.is_available():
-                self.pipeline.enable_model_cpu_offload()
-            
             self.current_model_id = model_id
             self.current_controlnet_id = controlnet_id
             self.type = task
@@ -1235,23 +1232,29 @@ def _txt2img_sync(request: Text2ImageRequest) -> InferenceResponse:
         pos_tokens, neg_tokens = apply_loras_and_embeddings(pipe, request.loras, request.embeddings)
     
     apply_scheduler(pipe, request.sampler_name, request.scheduler)
-    
+
     # Inject embedding tokens into prompts
     final_prompt = request.prompt
     if pos_tokens:
         final_prompt = f"{final_prompt}, {', '.join(pos_tokens)}"
-    
+
     final_negative_prompt = request.negative_prompt or ""
     if neg_tokens:
         if final_negative_prompt:
             final_negative_prompt = f"{final_negative_prompt}, {', '.join(neg_tokens)}"
         else:
             final_negative_prompt = ", ".join(neg_tokens)
-    
+
+    log("info", f"Inference parameters: steps={request.num_inference_steps} cfg={request.guidance_scale} size={request.width}x{request.height}")
     log("info", f"Final prompt: {final_prompt}")
     log("info", f"Final negative prompt: {final_negative_prompt}")
 
+    # Finalize pipeline before inference (enable offload after all adaptations)
+    if torch.cuda.is_available() and hasattr(pipe, "enable_model_cpu_offload"):
+        pipe.enable_model_cpu_offload()
+
     batch_size = safe_batch_size(request.batch_size)
+
     base_seed = request.seed if request.seed != -1 else torch.Generator().seed()
     image_paths: list[str] = []
     save_path: Path | None = None
@@ -1318,24 +1321,28 @@ def _img2img_sync(request: Image2ImageRequest) -> InferenceResponse:
         pos_tokens, neg_tokens = apply_loras_and_embeddings(pipe, request.loras, request.embeddings)
     
     apply_scheduler(pipe, request.sampler_name, request.scheduler)
-    
+
     # Inject embedding tokens into prompts
     final_prompt = request.prompt
     if pos_tokens:
         final_prompt = f"{final_prompt}, {', '.join(pos_tokens)}"
-    
+
     final_negative_prompt = request.negative_prompt or ""
     if neg_tokens:
         if final_negative_prompt:
             final_negative_prompt = f"{final_negative_prompt}, {', '.join(neg_tokens)}"
         else:
             final_negative_prompt = ", ".join(neg_tokens)
-    
+
+    log("info", f"Inference parameters: steps={request.num_inference_steps} cfg={request.guidance_scale} strength={request.strength}")
     log("info", f"Final prompt: {final_prompt}")
     log("info", f"Final negative prompt: {final_negative_prompt}")
 
-    init_image = load_image_any(request.image)
+    # Finalize pipeline before inference
+    if torch.cuda.is_available() and hasattr(pipe, "enable_model_cpu_offload"):
+        pipe.enable_model_cpu_offload()
 
+    init_image = load_image_any(request.image)
     batch_size = safe_batch_size(request.batch_size)
     base_seed = request.seed if request.seed != -1 else torch.Generator().seed()
     image_paths: list[str] = []
@@ -1414,8 +1421,13 @@ def _controlnet_sync(request: ControlNetRequest) -> InferenceResponse:
         else:
             final_negative_prompt = ", ".join(neg_tokens)
     
+    log("info", f"Inference parameters: steps={request.num_inference_steps} cfg={request.guidance_scale} size={request.width}x{request.height} scale={request.controlnet_conditioning_scale}")
     log("info", f"Final prompt: {final_prompt}")
     log("info", f"Final negative prompt: {final_negative_prompt}")
+
+    # Finalize pipeline before inference
+    if torch.cuda.is_available() and hasattr(pipe, "enable_model_cpu_offload"):
+        pipe.enable_model_cpu_offload()
 
     control_image = load_image_any(request.image)
 
