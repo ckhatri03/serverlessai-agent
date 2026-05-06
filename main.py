@@ -1158,58 +1158,58 @@ def apply_loras_and_embeddings(pipe, loras: list[dict], embeddings: list[dict]) 
                     raise HTTPException(status_code=404, detail=f"Embedding not found: {path}")
 
                 token = emb_path.stem
-                    # Try default loading first
-                    try:
-                        pipe.load_textual_inversion(str(emb_path), token=token)
-                        log("info", f"Loaded embedding: {emb_path.name} with token: {token}")
+                # Try default loading first
+                try:
+                    pipe.load_textual_inversion(str(emb_path), token=token)
+                    log("info", f"Loaded embedding: {emb_path.name} with token: {token}")
+                    if is_neg:
+                        neg_tokens.append(token)
+                    else:
+                        pos_tokens.append(token)
+                    continue
+                except Exception:
+                    pass
+
+                # Fallback for SDXL multi-encoder embeddings (e.g. Kohya style with clip_l/clip_g)
+                if emb_path.suffix == ".safetensors" and hasattr(pipe, "text_encoder_2"):
+                    state_dict = load_file(str(emb_path))
+                    # If it has clip_l and clip_g, we can load them individually
+                    if "clip_l" in state_dict and "clip_g" in state_dict:
+                        pipe.load_textual_inversion(
+                            state_dict["clip_l"], 
+                            token=token, 
+                            text_encoder=pipe.text_encoder, 
+                            tokenizer=pipe.tokenizer
+                        )
+                        pipe.load_textual_inversion(
+                            state_dict["clip_g"], 
+                            token=token, 
+                            text_encoder=pipe.text_encoder_2, 
+                            tokenizer=pipe.tokenizer_2
+                        )
+                        log("info", f"Loaded SDXL multi-encoder embedding (manual): {emb_path.name} with token: {token}")
                         if is_neg:
                             neg_tokens.append(token)
                         else:
                             pos_tokens.append(token)
                         continue
-                    except Exception:
-                        pass
-
-                    # Fallback for SDXL multi-encoder embeddings (e.g. Kohya style with clip_l/clip_g)
-                    if emb_path.suffix == ".safetensors" and hasattr(pipe, "text_encoder_2"):
-                        state_dict = load_file(str(emb_path))
-                        # If it has clip_l and clip_g, we can load them individually
-                        if "clip_l" in state_dict and "clip_g" in state_dict:
-                            pipe.load_textual_inversion(
-                                state_dict["clip_l"], 
-                                token=token, 
-                                text_encoder=pipe.text_encoder, 
-                                tokenizer=pipe.tokenizer
-                            )
-                            pipe.load_textual_inversion(
-                                state_dict["clip_g"], 
-                                token=token, 
-                                text_encoder=pipe.text_encoder_2, 
-                                tokenizer=pipe.tokenizer_2
-                            )
-                            log("info", f"Loaded SDXL multi-encoder embedding (manual): {emb_path.name} with token: {token}")
-                            if is_neg:
-                                neg_tokens.append(token)
-                            else:
-                                pos_tokens.append(token)
-                            continue
-                        else:
-                            # Try loading the whole state dict on the pipeline
-                            pipe.load_textual_inversion(state_dict, token=token)
-                            log("info", f"Loaded SDXL state_dict embedding: {emb_path.name} with token: {token}")
-                            if is_neg:
-                                neg_tokens.append(token)
-                            else:
-                                pos_tokens.append(token)
-                            continue
-                    
-                    # If we got here, it's a non-SDXL model or a different format, and the first attempt failed
-                    pipe.load_textual_inversion(str(emb_path))
-                    log("info", f"Loaded embedding (fallback): {emb_path.name}")
-                    if is_neg:
-                        neg_tokens.append(token)
                     else:
-                        pos_tokens.append(token)
+                        # Try loading the whole state dict on the pipeline
+                        pipe.load_textual_inversion(state_dict, token=token)
+                        log("info", f"Loaded SDXL state_dict embedding: {emb_path.name} with token: {token}")
+                        if is_neg:
+                            neg_tokens.append(token)
+                        else:
+                            pos_tokens.append(token)
+                        continue
+                
+                # If we got here, it's a non-SDXL model or a different format, and the first attempt failed
+                pipe.load_textual_inversion(str(emb_path))
+                log("info", f"Loaded embedding (fallback): {emb_path.name}")
+                if is_neg:
+                    neg_tokens.append(token)
+                else:
+                    pos_tokens.append(token)
     
     return pos_tokens, neg_tokens
 
