@@ -1290,16 +1290,23 @@ def _txt2img_sync(request: Text2ImageRequest) -> InferenceResponse:
             request.num_inference_steps
         )
         
-        output = pipe(
-            prompt=final_prompt,
-            negative_prompt=final_negative_prompt,
-            width=request.width,
-            height=request.height,
-            num_inference_steps=request.num_inference_steps,
-            guidance_scale=request.guidance_scale,
-            generator=generator,
-            callback_on_step_end=callback,
-        ).images[0]
+        # Check if pipeline supports negative_prompt
+        pipe_kwargs = {
+            "prompt": final_prompt,
+            "width": request.width,
+            "height": request.height,
+            "num_inference_steps": request.num_inference_steps,
+            "guidance_scale": request.guidance_scale,
+            "generator": generator,
+            "callback_on_step_end": callback,
+        }
+        
+        import inspect
+        sig = inspect.signature(pipe.__call__)
+        if "negative_prompt" in sig.parameters:
+            pipe_kwargs["negative_prompt"] = final_negative_prompt
+        
+        output = pipe(**pipe_kwargs).images[0]
 
         filename = f"{uuid.uuid4()}.png"
         save_path = settings.outputs_dir / filename
@@ -1379,16 +1386,23 @@ def _img2img_sync(request: Image2ImageRequest) -> InferenceResponse:
             request.num_inference_steps
         )
         
-        output = pipe(
-            prompt=final_prompt,
-            negative_prompt=final_negative_prompt,
-            image=init_image,
-            strength=request.strength,
-            num_inference_steps=request.num_inference_steps,
-            guidance_scale=request.guidance_scale,
-            generator=generator,
-            callback_on_step_end=callback,
-        ).images[0]
+        # Check if pipeline supports negative_prompt
+        pipe_kwargs = {
+            "prompt": final_prompt,
+            "image": init_image,
+            "strength": request.strength,
+            "num_inference_steps": request.num_inference_steps,
+            "guidance_scale": request.guidance_scale,
+            "generator": generator,
+            "callback_on_step_end": callback,
+        }
+        
+        import inspect
+        sig = inspect.signature(pipe.__call__)
+        if "negative_prompt" in sig.parameters:
+            pipe_kwargs["negative_prompt"] = final_negative_prompt
+        
+        output = pipe(**pipe_kwargs).images[0]
 
         filename = f"{uuid.uuid4()}.png"
         save_path = settings.outputs_dir / filename
@@ -1461,18 +1475,25 @@ def _controlnet_sync(request: ControlNetRequest) -> InferenceResponse:
         request.num_inference_steps
     )
     
-    output = pipe(
-        prompt=final_prompt,
-        negative_prompt=final_negative_prompt,
-        image=control_image,
-        controlnet_conditioning_scale=request.controlnet_conditioning_scale,
-        width=request.width,
-        height=request.height,
-        num_inference_steps=request.num_inference_steps,
-        guidance_scale=request.guidance_scale,
-        generator=generator,
-        callback_on_step_end=callback,
-    ).images[0]
+    # Check if pipeline supports negative_prompt
+    pipe_kwargs = {
+        "prompt": final_prompt,
+        "image": control_image,
+        "controlnet_conditioning_scale": request.controlnet_conditioning_scale,
+        "width": request.width,
+        "height": request.height,
+        "num_inference_steps": request.num_inference_steps,
+        "guidance_scale": request.guidance_scale,
+        "generator": generator,
+        "callback_on_step_end": callback,
+    }
+    
+    import inspect
+    sig = inspect.signature(pipe.__call__)
+    if "negative_prompt" in sig.parameters:
+        pipe_kwargs["negative_prompt"] = final_negative_prompt
+    
+    output = pipe(**pipe_kwargs).images[0]
     
     filename = f"{uuid.uuid4()}.png"
     save_path = settings.outputs_dir / filename
