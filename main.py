@@ -874,7 +874,7 @@ class PipelineManager:
                             model_id, 
                             torch_dtype=dtype, 
                             token=effective_hf_token,
-                            local_files_only=True
+                            local_files_only=False
                         )
                     elif "flux" in model_id.lower():
                         from diffusers import FluxPipeline
@@ -882,7 +882,7 @@ class PipelineManager:
                             model_id, 
                             torch_dtype=dtype, 
                             token=effective_hf_token,
-                            local_files_only=True
+                            local_files_only=False
                         )
                     else:
                         from diffusers import StableDiffusionPipeline
@@ -890,7 +890,7 @@ class PipelineManager:
                             model_id, 
                             torch_dtype=dtype, 
                             token=effective_hf_token,
-                            local_files_only=True
+                            local_files_only=False
                         )
                 else:
                     self.pipeline = AutoPipelineForText2Image.from_pretrained(
@@ -907,7 +907,7 @@ class PipelineManager:
                             model_id, 
                             torch_dtype=dtype, 
                             token=effective_hf_token,
-                            local_files_only=True
+                            local_files_only=False
                         )
                     elif "flux" in model_id.lower():
                         from diffusers import FluxImg2ImgPipeline
@@ -915,7 +915,7 @@ class PipelineManager:
                             model_id, 
                             torch_dtype=dtype, 
                             token=effective_hf_token,
-                            local_files_only=True
+                            local_files_only=False
                         )
                     else:
                         from diffusers import StableDiffusionImg2ImgPipeline
@@ -923,7 +923,7 @@ class PipelineManager:
                             model_id, 
                             torch_dtype=dtype, 
                             token=effective_hf_token,
-                            local_files_only=True
+                            local_files_only=False
                         )
                 else:
                     self.pipeline = AutoPipelineForImage2Image.from_pretrained(
@@ -966,8 +966,15 @@ class PipelineManager:
         except HTTPException:
             raise
         except Exception as exc:
+            msg = str(exc)
+            if "403" in msg:
+                log("error", f"403 Forbidden error detected for model {model_id}. This usually means you need to set HF_TOKEN and accept the license on Hugging Face.")
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN, 
+                    detail=f"Hugging Face 403 Forbidden for {model_id}. Ensure you have set HF_TOKEN and accepted the model license on Hugging Face."
+                ) from exc
             log("error", f"Failed to load pipeline model={model_id} task={task}: {exc}")
-            raise HTTPException(status_code=500, detail=f"Failed to load pipeline: {exc}")
+            raise HTTPException(status_code=500, detail=f"Failed to load pipeline: {exc}") from exc
 
 
 pipeline_manager = PipelineManager()
