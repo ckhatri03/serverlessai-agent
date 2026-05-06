@@ -195,6 +195,10 @@ def apply_scheduler(pipe, sampler_name: str | None, scheduler_type: str | None):
         log("warn", f"Unsupported sampler: {sampler_name}, skipping scheduler override")
         return
 
+    if isinstance(pipe, (FluxPipeline, FluxImg2ImgPipeline)) and scheduler_class is not FlowMatchEulerDiscreteScheduler:
+        log("info", f"Keeping native Flux scheduler; sampler {sampler_name} is not compatible with Flux timesteps")
+        return
+
     # Handle scheduler types (karras, etc.)
     kwargs = {}
     if scheduler_type == "karras":
