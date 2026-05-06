@@ -22,6 +22,8 @@ from diffusers import (
     StableDiffusionControlNetPipeline,
     WanPipeline, 
     WanImageToVideoPipeline,
+    FluxPipeline,
+    FluxImg2ImgPipeline,
     # Schedulers
     EulerDiscreteScheduler,
     EulerAncestralDiscreteScheduler,
@@ -185,6 +187,7 @@ def apply_scheduler(pipe, sampler_name: str | None, scheduler_type: str | None):
         "lms": LMSDiscreteScheduler,
         "pndm": PNDMScheduler,
         "ddim": DDIMScheduler,
+        "flow_match": FlowMatchEulerDiscreteScheduler,
     }
 
     scheduler_class = mapping.get(sampler_name.lower())
@@ -516,11 +519,11 @@ class SystemCheckResponse(BaseModel):
 async def system_check():
     # Check for model families
     families = {
-        "sdxl": (settings.models_dir / "checkpoints/sd_xl_base_1.0.safetensors").exists(),
-        "flux": (settings.models_dir / "checkpoints/flux1-schnell.safetensors").exists() or (settings.models_dir / "checkpoints/flux1-dev.safetensors").exists(),
-        "qwen": any((settings.models_dir / "checkpoints").glob("qwen*")),
-        "wan": any((settings.models_dir / "checkpoints").glob("wan*")),
-        "zit": any((settings.models_dir / "checkpoints").glob("zit*")),
+        "sdxl": (settings.models_dir / "checkpoints/sd_xl_base_1.0.safetensors").exists() or any((settings.models_dir / "checkpoints").glob("*xl*")),
+        "flux": (settings.models_dir / "checkpoints/flux1-schnell.safetensors").exists() or (settings.models_dir / "checkpoints/flux1-dev.safetensors").exists() or any((settings.models_dir / "checkpoints").glob("*flux*")),
+        "qwen": any((settings.models_dir / "checkpoints").glob("*qwen*")),
+        "wan": any((settings.models_dir / "checkpoints").glob("*wan*")),
+        "zit": any((settings.models_dir / "checkpoints").glob("*zit*")),
         "illustrious": any((settings.models_dir / "checkpoints").glob("*illustrious*")),
         "pony": any((settings.models_dir / "checkpoints").glob("*pony*")),
     }
@@ -869,6 +872,14 @@ class PipelineManager:
                             token=effective_hf_token,
                             local_files_only=True
                         )
+                    elif "flux" in model_id.lower():
+                        from diffusers import FluxPipeline
+                        self.pipeline = FluxPipeline.from_single_file(
+                            model_id, 
+                            torch_dtype=dtype, 
+                            token=effective_hf_token,
+                            local_files_only=True
+                        )
                     else:
                         from diffusers import StableDiffusionPipeline
                         self.pipeline = StableDiffusionPipeline.from_single_file(
@@ -889,6 +900,14 @@ class PipelineManager:
                     if "xl" in model_id.lower():
                         from diffusers import StableDiffusionXLImg2ImgPipeline
                         self.pipeline = StableDiffusionXLImg2ImgPipeline.from_single_file(
+                            model_id, 
+                            torch_dtype=dtype, 
+                            token=effective_hf_token,
+                            local_files_only=True
+                        )
+                    elif "flux" in model_id.lower():
+                        from diffusers import FluxImg2ImgPipeline
+                        self.pipeline = FluxImg2ImgPipeline.from_single_file(
                             model_id, 
                             torch_dtype=dtype, 
                             token=effective_hf_token,
