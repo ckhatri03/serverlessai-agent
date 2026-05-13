@@ -1590,9 +1590,15 @@ def _txt2vid_sync(request: Text2VideoRequest) -> dict[str, Any]:
     start_time = time.time()
     pipe = pipeline_manager.load_pipeline(request.model_id, "t2v", hf_token=request.hf_token)
 
+    # Finalize pipeline before inference (enable offload after all adaptations)
+    if torch.cuda.is_available() and hasattr(pipe, "enable_model_cpu_offload"):
+        log("info", "Enabling model CPU offload for video pipeline")
+        pipe.enable_model_cpu_offload()
+
     # Apply LoRAs and Embeddings
     pos_tokens, neg_tokens = [], []
     if request.loras or request.embeddings:
+        log("info", "Applying LoRAs and embeddings to video pipeline")
         pipeline_manager.has_loras = True
         pos_tokens, neg_tokens = apply_loras_and_embeddings(pipe, request.loras, request.embeddings)
 
@@ -1666,9 +1672,15 @@ def _img2vid_sync(request: Image2VideoRequest) -> dict[str, Any]:
     pipe = pipeline_manager.load_pipeline(request.model_id, "i2v", hf_token=request.hf_token)
     init_image = load_image_any(request.image)
     
+    # Finalize pipeline before inference (enable offload after all adaptations)
+    if torch.cuda.is_available() and hasattr(pipe, "enable_model_cpu_offload"):
+        log("info", "Enabling model CPU offload for video pipeline")
+        pipe.enable_model_cpu_offload()
+
     # Apply LoRAs and Embeddings
     pos_tokens, neg_tokens = [], []
     if request.loras or request.embeddings:
+        log("info", "Applying LoRAs and embeddings to video pipeline")
         pipeline_manager.has_loras = True
         pos_tokens, neg_tokens = apply_loras_and_embeddings(pipe, request.loras, request.embeddings)
     
