@@ -522,11 +522,12 @@ class SystemCheckResponse(BaseModel):
 @app.get("/api/v1/system/check", response_model=SystemCheckResponse, dependencies=[Depends(require_agent_auth)])
 async def system_check():
     # Check for model families
+    wan_diffusers_dir = settings.models_dir / "diffusers"
     families = {
         "sdxl": (settings.models_dir / "checkpoints/sd_xl_base_1.0.safetensors").exists() or any((settings.models_dir / "checkpoints").glob("*xl*")),
         "flux": (settings.models_dir / "checkpoints/flux1-schnell.safetensors").exists() or (settings.models_dir / "checkpoints/flux1-dev.safetensors").exists() or any((settings.models_dir / "checkpoints").glob("*flux*")),
         "qwen": any((settings.models_dir / "checkpoints").glob("*qwen*")),
-        "wan": any((settings.models_dir / "checkpoints").glob("*wan*")),
+        "wan": any((settings.models_dir / "checkpoints").glob("*wan*")) or any(wan_diffusers_dir.glob("*Wan*")) or any(wan_diffusers_dir.glob("*wan*")),
         "zit": any((settings.models_dir / "checkpoints").glob("*zit*")),
         "illustrious": any((settings.models_dir / "checkpoints").glob("*illustrious*")),
         "pony": any((settings.models_dir / "checkpoints").glob("*pony*")),
