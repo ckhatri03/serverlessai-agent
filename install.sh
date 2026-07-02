@@ -89,9 +89,10 @@ check_cuda
 check_pytorch
 
 log "downloading agent files"
-curl -fsSL "$RAW_BASE/main.py" -o "$INSTALL_DIR/main.py"
-curl -fsSL "$RAW_BASE/start-agent.sh" -o "$INSTALL_DIR/start-agent.sh"
-curl -fsSL "$RAW_BASE/requirements.txt" -o "$INSTALL_DIR/requirements.txt"
+CB=$(date +%s)
+curl -fsSL "$RAW_BASE/main.py?cb=$CB" -o "$INSTALL_DIR/main.py"
+curl -fsSL "$RAW_BASE/start-agent.sh?cb=$CB" -o "$INSTALL_DIR/start-agent.sh"
+curl -fsSL "$RAW_BASE/requirements.txt?cb=$CB" -o "$INSTALL_DIR/requirements.txt"
 chmod +x "$INSTALL_DIR/start-agent.sh"
 
 log "installing agent Python dependencies"
