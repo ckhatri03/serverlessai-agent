@@ -30,4 +30,8 @@ if [ ! -f "$PYTHON_EXEC" ]; then
   PYTHON_EXEC="python"
 fi
 
-"$PYTHON_EXEC" -u "$SCRIPT_DIR/main.py" 2>&1 | tee -a "$AGENT_LOG_FILE"
+while true; do
+  "$PYTHON_EXEC" -u "$SCRIPT_DIR/main.py" 2>&1 | tee -a "$AGENT_LOG_FILE"
+  echo "Agent process exited. Restarting in 2 seconds..." | tee -a "$AGENT_LOG_FILE"
+  sleep 2
+done
