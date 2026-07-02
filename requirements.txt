@@ -10,7 +10,7 @@ diffusers==0.38.0
 transformers<5.0.0
 accelerate==1.1.1
 huggingface_hub
-xformers==0.0.29.post1
+xformers
 sentencepiece
 opencv-python
 numpy<2.0.0
