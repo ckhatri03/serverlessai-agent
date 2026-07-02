@@ -382,6 +382,8 @@ class Text2ImageRequest(BaseModel):
     loras: list[dict] = Field(default_factory=list)
     embeddings: list[dict] = Field(default_factory=list)
     hf_token: str | None = None
+    face_correct: bool = False
+    hand_correct: bool = False
 
 
 class Image2ImageRequest(BaseModel):
@@ -401,6 +403,8 @@ class Image2ImageRequest(BaseModel):
     loras: list[dict] = Field(default_factory=list)
     embeddings: list[dict] = Field(default_factory=list)
     hf_token: str | None = None
+    face_correct: bool = False
+    hand_correct: bool = False
 
 
 class InferenceResponse(BaseModel):
@@ -870,12 +874,25 @@ class PipelineManager:
                 if is_single_file:
                     # SDXL models often need specific classes and can be finicky with CLIP sub-models
                     if "xl" in model_id.lower() or "illustrious" in model_id.lower() or "pony" in model_id.lower():
+                        vae = None
+                        try:
+                            from diffusers import AutoencoderKL
+                            log("info", "Loading FP16-fixed VAE (madebyollin/sdxl-vae-fp16-fix) for SDXL model...")
+                            vae = AutoencoderKL.from_pretrained(
+                                "madebyollin/sdxl-vae-fp16-fix", 
+                                torch_dtype=dtype, 
+                                token=effective_hf_token
+                            )
+                        except Exception as e:
+                            log("warning", f"Failed to load madebyollin/sdxl-vae-fp16-fix VAE: {e}")
+                        
                         from diffusers import StableDiffusionXLPipeline
                         self.pipeline = StableDiffusionXLPipeline.from_single_file(
                             model_id, 
                             torch_dtype=dtype, 
                             token=effective_hf_token,
-                            local_files_only=False
+                            local_files_only=False,
+                            **(dict(vae=vae) if vae else {})
                         )
                     elif "flux" in model_id.lower():
                         from diffusers import FluxPipeline
@@ -902,13 +919,26 @@ class PipelineManager:
                     )
             elif task == "i2i":
                 if is_single_file:
-                    if "xl" in model_id.lower():
+                    if "xl" in model_id.lower() or "illustrious" in model_id.lower() or "pony" in model_id.lower():
+                        vae = None
+                        try:
+                            from diffusers import AutoencoderKL
+                            log("info", "Loading FP16-fixed VAE (madebyollin/sdxl-vae-fp16-fix) for SDXL model...")
+                            vae = AutoencoderKL.from_pretrained(
+                                "madebyollin/sdxl-vae-fp16-fix", 
+                                torch_dtype=dtype, 
+                                token=effective_hf_token
+                            )
+                        except Exception as e:
+                            log("warning", f"Failed to load madebyollin/sdxl-vae-fp16-fix VAE: {e}")
+                        
                         from diffusers import StableDiffusionXLImg2ImgPipeline
                         self.pipeline = StableDiffusionXLImg2ImgPipeline.from_single_file(
                             model_id, 
                             torch_dtype=dtype, 
                             token=effective_hf_token,
-                            local_files_only=False
+                            local_files_only=False,
+                            **(dict(vae=vae) if vae else {})
                         )
                     elif "flux" in model_id.lower():
                         from diffusers import FluxImg2ImgPipeline
@@ -1246,6 +1276,147 @@ def safe_batch_size(value: int) -> int:
     return min(max(value, 1), 20)
 
 
+def apply_face_and_hand_corrections(
+    model_id: str,
+    image: Image.Image,
+    prompt: str,
+    negative_prompt: str,
+    steps: int,
+    cfg: float,
+    sampler_name: str | None,
+    scheduler: str | None,
+    hf_token: str | None,
+    generator: torch.Generator,
+    face: bool,
+    hand: bool
+) -> Image.Image:
+    if not face and not hand:
+        return image
+
+    boxes = []
+    w, h = image.size
+
+    if face:
+        try:
+            import mediapipe as mp
+            import numpy as np
+            mp_face_detection = mp.solutions.face_detection
+            with mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.4) as face_detection:
+                img_np = np.array(image.convert("RGB"))
+                results = face_detection.process(img_np)
+                if results.detections:
+                    for detection in results.detections:
+                        bbox = detection.location_data.relative_bounding_box
+                        xmin = int(bbox.xmin * w)
+                        ymin = int(bbox.ymin * h)
+                        width = int(bbox.width * w)
+                        height = int(bbox.height * h)
+                        pad_w = int(width * 0.25)
+                        pad_h = int(height * 0.25)
+                        xmin = max(0, xmin - pad_w)
+                        ymin = max(0, ymin - pad_h)
+                        xmax = min(w, xmin + width + 2*pad_w)
+                        ymax = min(h, ymin + height + 2*pad_h)
+                        if xmax - xmin > 10 and ymax - ymin > 10:
+                            boxes.append(("face", (xmin, ymin, xmax, ymax)))
+        except Exception as e:
+            log("error", f"Face detection for correction failed: {e}")
+
+    if hand:
+        try:
+            import mediapipe as mp
+            import numpy as np
+            mp_hands = mp.solutions.hands
+            with mp_hands.Hands(static_image_mode=True, max_num_hands=6, min_detection_confidence=0.3) as hands_detector:
+                img_np = np.array(image.convert("RGB"))
+                results = hands_detector.process(img_np)
+                if results.multi_hand_landmarks:
+                    for hand_landmarks in results.multi_hand_landmarks:
+                        xs = [lm.x * w for lm in hand_landmarks.landmark]
+                        ys = [lm.y * h for lm in hand_landmarks.landmark]
+                        xmin = int(min(xs))
+                        ymin = int(min(ys))
+                        xmax = int(max(xs))
+                        ymax = int(max(ys))
+                        width = xmax - xmin
+                        height = ymax - ymin
+                        pad_w = int(width * 0.3)
+                        pad_h = int(height * 0.3)
+                        xmin = max(0, xmin - pad_w)
+                        ymin = max(0, ymin - pad_h)
+                        xmax = min(w, xmax + pad_w)
+                        ymax = min(h, ymax + pad_h)
+                        if xmax - xmin > 10 and ymax - ymin > 10:
+                            boxes.append(("hand", (xmin, ymin, xmax, ymax)))
+        except Exception as e:
+            log("error", f"Hand detection for correction failed: {e}")
+
+    if not boxes:
+        return image
+
+    log("info", f"Applying corrections: found {len(boxes)} regions to enhance.")
+    
+    try:
+        i2i_pipe = pipeline_manager.load_pipeline(model_id, "i2i", hf_token=hf_token)
+        apply_scheduler(i2i_pipe, sampler_name, scheduler)
+        if torch.cuda.is_available() and hasattr(i2i_pipe, "enable_model_cpu_offload"):
+            i2i_pipe.enable_model_cpu_offload()
+    except Exception as e:
+        log("error", f"Failed to load Image2Image pipeline for detailer: {e}")
+        return image
+
+    model_lower = str(i2i_pipe.__class__).lower()
+    is_xl_or_flux = "xl" in model_lower or "flux" in model_lower or "illustrious" in model_lower or "pony" in model_lower
+    target_size = (1024, 1024) if is_xl_or_flux else (512, 512)
+
+    from PIL import ImageDraw, ImageFilter
+
+    result_image = image.copy()
+
+    for i, (label, (xmin, ymin, xmax, ymax)) in enumerate(boxes):
+        log("info", f"Enhancing region {i+1}/{len(boxes)}: {label} at {xmin},{ymin},{xmax},{ymax}")
+        orig_w = xmax - xmin
+        orig_h = ymax - ymin
+        
+        crop = result_image.crop((xmin, ymin, xmax, ymax))
+        crop_resized = crop.resize(target_size, Image.Resampling.LANCZOS)
+        crop_prompt = f"{prompt}, close-up of {label}, highly detailed, sharp focus"
+        
+        try:
+            strength = 0.35 if label == "face" else 0.4
+            
+            pipe_kwargs = {
+                "prompt": crop_prompt,
+                "image": crop_resized,
+                "strength": strength,
+                "num_inference_steps": max(15, int(steps * 0.8)),
+                "guidance_scale": cfg,
+                "generator": generator,
+            }
+            
+            import inspect
+            sig = inspect.signature(i2i_pipe.__call__)
+            if "negative_prompt" in sig.parameters:
+                pipe_kwargs["negative_prompt"] = negative_prompt
+            
+            crop_fixed = i2i_pipe(**pipe_kwargs).images[0]
+            crop_fixed_resized = crop_fixed.resize((orig_w, orig_h), Image.Resampling.LANCZOS)
+            
+            mask = Image.new("L", (orig_w, orig_h), 0)
+            draw = ImageDraw.Draw(mask)
+            border = max(4, int(min(orig_w, orig_h) * 0.12))
+            draw.rectangle([border, border, orig_w - border, orig_h - border], fill=255)
+            mask = mask.filter(ImageFilter.GaussianBlur(radius=border))
+            
+            result_image.paste(crop_fixed_resized, (xmin, ymin), mask)
+            
+        except Exception as e:
+            log("error", f"Failed to enhance region {i+1}: {e}")
+            continue
+
+    return result_image
+
+
 @app.post("/api/v1/txt2img", response_model=InferenceResponse, dependencies=[Depends(require_agent_auth)])
 async def txt2img(request: Text2ImageRequest) -> InferenceResponse:
     async with generation_session(request.job_id or "txt2img"):
@@ -1319,6 +1490,22 @@ def _txt2img_sync(request: Text2ImageRequest) -> InferenceResponse:
             pipe_kwargs["negative_prompt"] = final_negative_prompt
         
         output = pipe(**pipe_kwargs).images[0]
+
+        if request.face_correct or request.hand_correct:
+            output = apply_face_and_hand_corrections(
+                model_id=request.model_id,
+                image=output,
+                prompt=request.prompt,
+                negative_prompt=request.negative_prompt or "",
+                steps=request.num_inference_steps,
+                cfg=request.guidance_scale,
+                sampler_name=request.sampler_name,
+                scheduler=request.scheduler,
+                hf_token=request.hf_token,
+                generator=generator,
+                face=request.face_correct,
+                hand=request.hand_correct
+            )
 
         filename = f"{uuid.uuid4()}.png"
         save_path = settings.outputs_dir / filename
@@ -1415,6 +1602,22 @@ def _img2img_sync(request: Image2ImageRequest) -> InferenceResponse:
             pipe_kwargs["negative_prompt"] = final_negative_prompt
         
         output = pipe(**pipe_kwargs).images[0]
+
+        if request.face_correct or request.hand_correct:
+            output = apply_face_and_hand_corrections(
+                model_id=request.model_id,
+                image=output,
+                prompt=request.prompt,
+                negative_prompt=request.negative_prompt or "",
+                steps=request.num_inference_steps,
+                cfg=request.guidance_scale,
+                sampler_name=request.sampler_name,
+                scheduler=request.scheduler,
+                hf_token=request.hf_token,
+                generator=generator,
+                face=request.face_correct,
+                hand=request.hand_correct
+            )
 
         filename = f"{uuid.uuid4()}.png"
         save_path = settings.outputs_dir / filename
